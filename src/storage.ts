@@ -7,8 +7,17 @@ const STORE_FILE = "workspace-usage.json";
 const CACHE_FILE = "last-dashboard.json";
 const RAW_CACHE_FILE = "cache/raw-latest.json";
 const HISTORY_DIR = "cache/history";
-/** Keep enough history to cover several billing cycles without unbounded growth. */
-const MAX_HISTORY_FILES = 60;
+
+/** One snapshot file per calendar day; older days are deleted. */
+const MAX_HISTORY_DAYS = 14;
+/** Hard cap on history directory size (bytes). Oldest days dropped first. */
+const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
+/** Skip writing raw cache when the slimmed payload would exceed this. */
+const MAX_RAW_BYTES = 512 * 1024;
+/** Drop closed workspace windows older than this (ms). */
+const WINDOW_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/** Orphaned atomic-write temps older than this are deleted. */
+const TMP_MAX_AGE_MS = 60 * 60 * 1000;
 
 const emptyStore = (): WorkspaceStore => ({
   version: 1,
@@ -34,6 +43,7 @@ export interface RawDashboardSnapshot {
 
 export class LocalStore {
   private readonly dir: string;
+  private maintenanceDone = false;
 
   constructor(globalStorageUri: vscode.Uri) {
     this.dir = globalStorageUri.fsPath;
@@ -49,13 +59,19 @@ export class LocalStore {
   }
 
   /**
-   * Crash-safe write: write to a sibling `.tmp` file, fsync, then rename over
-   * the target so a mid-write crash cannot truncate a good cache file.
+   * Crash-safe write: write to a sibling `.tmp` file then rename over the
+   * target so a mid-write crash cannot truncate a good cache file.
    */
-  private async writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  private async writeJsonAtomic(
+    filePath: string,
+    value: unknown,
+    pretty = false
+  ): Promise<void> {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    const body = JSON.stringify(value, null, 2);
+    const body = pretty
+      ? JSON.stringify(value, null, 2)
+      : JSON.stringify(value);
     try {
       await fs.writeFile(tmp, body, "utf8");
       await fs.rename(tmp, filePath);
@@ -65,8 +81,55 @@ export class LocalStore {
     }
   }
 
+  /** Run once per process: purge orphaned temps and enforce history caps. */
+  async runMaintenance(): Promise<void> {
+    if (this.maintenanceDone) {
+      return;
+    }
+    this.maintenanceDone = true;
+    await this.ensureDir();
+    await Promise.all([
+      this.cleanupOrphanTemps(),
+      this.pruneHistory(),
+    ]);
+  }
+
+  private async cleanupOrphanTemps(): Promise<void> {
+    const cutoff = Date.now() - TMP_MAX_AGE_MS;
+    const walk = async (dir: string): Promise<void> => {
+      let entries;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      await Promise.all(
+        entries.map(async (ent) => {
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) {
+            await walk(full);
+            return;
+          }
+          if (!ent.name.endsWith(".tmp")) {
+            return;
+          }
+          try {
+            const st = await fs.stat(full);
+            if (st.mtimeMs < cutoff) {
+              await fs.unlink(full);
+            }
+          } catch {
+            // ignore
+          }
+        })
+      );
+    };
+    await walk(this.dir);
+  }
+
   async loadWorkspaceStore(): Promise<WorkspaceStore> {
     await this.ensureDir();
+    void this.runMaintenance();
     try {
       const raw = await fs.readFile(path.join(this.dir, STORE_FILE), "utf8");
       const parsed = JSON.parse(raw) as WorkspaceStore;
@@ -82,7 +145,8 @@ export class LocalStore {
 
   async saveWorkspaceStore(store: WorkspaceStore): Promise<void> {
     await this.ensureDir();
-    await this.writeJsonAtomic(path.join(this.dir, STORE_FILE), store);
+    pruneClosedWindows(store);
+    await this.writeJsonAtomic(path.join(this.dir, STORE_FILE), store, true);
   }
 
   async clearWorkspaceStats(): Promise<void> {
@@ -90,11 +154,11 @@ export class LocalStore {
   }
 
   async loadCachedDashboard(): Promise<DashboardData | undefined> {
+    void this.runMaintenance();
     try {
       const raw = await fs.readFile(path.join(this.dir, CACHE_FILE), "utf8");
       return JSON.parse(raw) as DashboardData;
     } catch {
-      // Fall back to newest history file if the primary cache is missing/corrupt.
       return this.loadNewestHistoryDashboard();
     }
   }
@@ -119,22 +183,24 @@ export class LocalStore {
   }
 
   /**
-   * Persist the dashboard view model as the “latest” cache and append a
-   * timestamped history copy so a later overwrite cannot erase prior data.
+   * Persist the dashboard view model as “latest”, and overwrite today’s
+   * history file (at most one file per calendar day).
    */
   async saveCachedDashboard(data: DashboardData): Promise<void> {
     await this.ensureDir();
-    await this.writeJsonAtomic(path.join(this.dir, CACHE_FILE), data);
-    await this.appendHistory(data);
+    await this.writeJsonAtomic(path.join(this.dir, CACHE_FILE), data, true);
+    await this.writeDailyHistory(data);
   }
 
-  private async appendHistory(data: DashboardData): Promise<void> {
-    const stamp = (data.fetchedAt || new Date().toISOString())
-      .replace(/[:.]/g, "-")
-      .replace(/Z$/, "Z");
-    const histPath = path.join(this.dir, HISTORY_DIR, `${stamp}.json`);
+  private async writeDailyHistory(data: DashboardData): Promise<void> {
+    const day = (data.fetchedAt || new Date().toISOString()).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      return;
+    }
+    const histPath = path.join(this.dir, HISTORY_DIR, `${day}.json`);
     try {
-      await this.writeJsonAtomic(histPath, data);
+      // Compact JSON — history is for recovery, not hand-editing.
+      await this.writeJsonAtomic(histPath, data, false);
       await this.pruneHistory();
     } catch {
       // History is best-effort; latest cache already written.
@@ -145,21 +211,51 @@ export class LocalStore {
     const histDir = path.join(this.dir, HISTORY_DIR);
     let names: string[];
     try {
-      names = (await fs.readdir(histDir))
-        .filter((n) => n.endsWith(".json"))
-        .sort();
+      names = (await fs.readdir(histDir)).filter((n) => n.endsWith(".json"));
     } catch {
       return;
     }
-    const excess = names.length - MAX_HISTORY_FILES;
-    if (excess <= 0) {
-      return;
+
+    const dailyRe = /^\d{4}-\d{2}-\d{2}\.json$/;
+    // Migrate away from legacy per-refresh filenames (…T12-30-54….json).
+    const legacy = names.filter((n) => !dailyRe.test(n));
+    if (legacy.length) {
+      await Promise.all(
+        legacy.map((n) =>
+          fs.unlink(path.join(histDir, n)).catch(() => undefined)
+        )
+      );
+      names = names.filter((n) => dailyRe.test(n));
     }
-    await Promise.all(
-      names.slice(0, excess).map((n) =>
-        fs.unlink(path.join(histDir, n)).catch(() => undefined)
-      )
-    );
+
+    names.sort();
+    const excessDays = names.length - MAX_HISTORY_DAYS;
+    if (excessDays > 0) {
+      await Promise.all(
+        names.slice(0, excessDays).map((n) =>
+          fs.unlink(path.join(histDir, n)).catch(() => undefined)
+        )
+      );
+      names = names.slice(excessDays);
+    }
+
+    let total = 0;
+    const sized: Array<{ name: string; size: number }> = [];
+    for (const name of names) {
+      try {
+        const st = await fs.stat(path.join(histDir, name));
+        sized.push({ name, size: st.size });
+        total += st.size;
+      } catch {
+        // ignore missing
+      }
+    }
+    sized.sort((a, b) => a.name.localeCompare(b.name));
+    while (total > MAX_HISTORY_BYTES && sized.length > 1) {
+      const drop = sized.shift()!;
+      total -= drop.size;
+      await fs.unlink(path.join(histDir, drop.name)).catch(() => undefined);
+    }
   }
 
   async loadRawSnapshot(): Promise<RawDashboardSnapshot | undefined> {
@@ -173,6 +269,66 @@ export class LocalStore {
 
   async saveRawSnapshot(snapshot: RawDashboardSnapshot): Promise<void> {
     await this.ensureDir();
-    await this.writeJsonAtomic(path.join(this.dir, RAW_CACHE_FILE), snapshot);
+    const slim = slimRawSnapshot(snapshot);
+    const body = JSON.stringify(slim);
+    if (Buffer.byteLength(body, "utf8") > MAX_RAW_BYTES) {
+      // Last resort: drop bulky local arrays too.
+      const minimal: RawDashboardSnapshot = {
+        savedAt: slim.savedAt,
+        me: slim.me,
+        summary: slim.summary,
+        period: slim.period,
+        sand: slim.sand,
+        aggregated: slim.aggregated,
+        filtered: slim.filtered,
+        rangeStartMs: slim.rangeStartMs,
+        rangeEndMs: slim.rangeEndMs,
+        rangeKind: slim.rangeKind,
+      };
+      await this.writeJsonAtomic(
+        path.join(this.dir, RAW_CACHE_FILE),
+        minimal,
+        false
+      );
+      return;
+    }
+    await this.writeJsonAtomic(path.join(this.dir, RAW_CACHE_FILE), slim, false);
   }
+}
+
+/** Keep open windows + recent closed ones; drop old closed sessions. */
+function pruneClosedWindows(store: WorkspaceStore): void {
+  const cutoff = Date.now() - WINDOW_RETENTION_MS;
+  store.windows = (store.windows ?? []).filter((w) => {
+    if (!w.endedAt) {
+      return true;
+    }
+    const end = Date.parse(w.endedAt);
+    return Number.isFinite(end) && end >= cutoff;
+  });
+}
+
+/**
+ * Drop the bulky filtered event list (view model + aggregates already cover
+ * recovery). Keep a count so re-agg tooling knows events existed.
+ */
+function slimRawSnapshot(snapshot: RawDashboardSnapshot): RawDashboardSnapshot {
+  const out: RawDashboardSnapshot = { ...snapshot };
+  const filtered = snapshot.filtered;
+  if (filtered && typeof filtered === "object") {
+    const f = filtered as Record<string, unknown>;
+    const events = f.usageEventsDisplay;
+    const count = Array.isArray(events)
+      ? events.length
+      : typeof f.totalUsageEventsCount === "number"
+        ? f.totalUsageEventsCount
+        : undefined;
+    const { usageEventsDisplay: _drop, ...rest } = f;
+    out.filtered = {
+      ...rest,
+      totalUsageEventsCount: count ?? f.totalUsageEventsCount,
+      _eventsOmitted: Array.isArray(events),
+    };
+  }
+  return out;
 }

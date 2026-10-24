@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { pathToFileURL } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import {
   NO_WORKSPACE_ID,
   NO_WORKSPACE_LABEL,
@@ -12,6 +12,8 @@ export interface ConversationWorkspace {
   workspaceId: string;
   displayName: string;
 }
+
+const CURSOR_PROJECT_PREFIX = "cursor-project:";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -75,7 +77,7 @@ export function identityFromProjectSlug(slug: string): ConversationWorkspace {
   }
   if (/^\d{10,16}$/.test(slug) || slug.startsWith("tmp-") || slug === "ext-dev") {
     return {
-      workspaceId: `cursor-project:${slug}`,
+      workspaceId: `${CURSOR_PROJECT_PREFIX}${slug}`,
       displayName: slug.startsWith("tmp-") ? "Temporary" : slug,
     };
   }
@@ -90,15 +92,90 @@ export function identityFromProjectSlug(slug: string): ConversationWorkspace {
       return resolved;
     }
     return {
-      workspaceId: `cursor-project:${slug}`,
+      workspaceId: `${CURSOR_PROJECT_PREFIX}${slug}`,
       displayName,
     };
   }
 
   return {
-    workspaceId: `cursor-project:${slug}`,
+    workspaceId: `${CURSOR_PROJECT_PREFIX}${slug}`,
     displayName: slug,
   };
+}
+
+/**
+ * Collapse alias ids (cursor-project slugs, alternate Cursor Workspaces
+ * paths, legacy no-folder) onto one stable identity per project.
+ */
+export function canonicalizeWorkspaceIdentity(match: {
+  workspaceId: string;
+  displayName: string;
+}): ConversationWorkspace {
+  if (
+    match.workspaceId === "no-folder" ||
+    match.workspaceId === NO_WORKSPACE_ID ||
+    match.displayName === "(no folder)" ||
+    match.displayName === NO_WORKSPACE_LABEL
+  ) {
+    return { workspaceId: NO_WORKSPACE_ID, displayName: NO_WORKSPACE_LABEL };
+  }
+
+  const workspaceId = normalizeWorkspaceId(match.workspaceId);
+
+  if (workspaceId.startsWith(CURSOR_PROJECT_PREFIX)) {
+    return identityFromProjectSlug(
+      workspaceId.slice(CURSOR_PROJECT_PREFIX.length)
+    );
+  }
+
+  if (workspaceId.startsWith("file:")) {
+    const remapped = remapCursorWorkspacesFileUri(workspaceId);
+    if (remapped) {
+      return remapped;
+    }
+    const base = fileUriBasename(workspaceId);
+    return {
+      workspaceId,
+      displayName: match.displayName || base || workspaceId,
+    };
+  }
+
+  const fromName =
+    match.displayName && match.displayName !== workspaceId
+      ? resolveWorkspacesFolder(match.displayName)
+      : undefined;
+  if (fromName) {
+    return fromName;
+  }
+
+  return {
+    workspaceId,
+    displayName: match.displayName || workspaceId,
+  };
+}
+
+export function isCursorProjectId(workspaceId: string): boolean {
+  return workspaceId.startsWith(CURSOR_PROJECT_PREFIX);
+}
+
+function remapCursorWorkspacesFileUri(
+  fileUri: string
+): ConversationWorkspace | undefined {
+  const fsPath = fileUriToFsPath(fileUri);
+  if (!fsPath) {
+    return undefined;
+  }
+  const parent = path.basename(path.dirname(fsPath));
+  if (parent !== "Cursor Workspaces") {
+    return undefined;
+  }
+  const base = path.basename(fsPath);
+  if (!base) {
+    return undefined;
+  }
+  // Always prefer the canonical folder under Dokumente/Documents when it exists,
+  // so ~/Cursor Workspaces/Foo and ~/Dokumente/Cursor Workspaces/Foo collapse.
+  return resolveWorkspacesFolder(base);
 }
 
 function resolveWorkspacesFolder(
@@ -120,9 +197,19 @@ function resolveWorkspacesFolder(
     }
     const needle = slugTail.toLowerCase().replace(/_/g, "-");
     for (const name of names) {
+      if (name.endsWith(".code-workspace")) {
+        continue;
+      }
       const cand = name.toLowerCase().replace(/_/g, "-");
       if (cand === needle) {
         const fsPath = path.join(root, name);
+        try {
+          if (!fs.statSync(fsPath).isDirectory()) {
+            continue;
+          }
+        } catch {
+          continue;
+        }
         return {
           workspaceId: normalizeWorkspaceId(pathToFileUri(fsPath)),
           displayName: name,
@@ -135,4 +222,17 @@ function resolveWorkspacesFolder(
 
 function pathToFileUri(fsPath: string): string {
   return pathToFileURL(path.resolve(fsPath)).href;
+}
+
+function fileUriToFsPath(fileUri: string): string | undefined {
+  try {
+    return fileURLToPath(fileUri);
+  } catch {
+    return undefined;
+  }
+}
+
+function fileUriBasename(fileUri: string): string | undefined {
+  const fsPath = fileUriToFsPath(fileUri);
+  return fsPath ? path.basename(fsPath) : undefined;
 }

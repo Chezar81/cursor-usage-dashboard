@@ -16,3 +16,8 @@ export function normalizeWorkspaceId(id: string): string {
     return id.replace(/\/$/, "");
   }
 }
+
+/** Collapse Usage_Dashboard / Usage-Dashboard style aliases for grouping. */
+export function normalizeDisplayName(name: string): string {
+  return name.trim().toLowerCase().replace(/_/g, "-");
+}

@@ -5,7 +5,11 @@ import {
   eventTokens,
   snapshotFromEvents,
 } from "./aggregator";
-import { buildConversationWorkspaceMap } from "./conversationWorkspaceMap";
+import {
+  buildConversationWorkspaceMap,
+  canonicalizeWorkspaceIdentity,
+  isCursorProjectId,
+} from "./conversationWorkspaceMap";
 import {
   apiConversationIds,
   type LocalConversationActivity,
@@ -15,6 +19,7 @@ import type { LocalStore } from "./storage";
 import {
   NO_WORKSPACE_ID,
   NO_WORKSPACE_LABEL,
+  normalizeDisplayName,
   normalizeWorkspaceId,
 } from "./workspaceLabels";
 
@@ -311,14 +316,14 @@ export class WorkspaceUsageTracker {
   /** Surface every still-open folder (all Cursor windows) plus this window's folder. */
   private ensureOpenWorkspaces(data: WorkspaceStore): void {
     const ensure = (workspaceId: string, displayName: string) => {
-      const id = normalizeWorkspaceId(workspaceId);
-      const existing = data.workspaces[id];
+      const norm = this.normalizeIdentity({ workspaceId, displayName });
+      const existing = data.workspaces[norm.workspaceId];
       if (existing) {
-        existing.displayName = displayName;
+        existing.displayName = norm.displayName;
         return;
       }
-      data.workspaces[id] = {
-        displayName,
+      data.workspaces[norm.workspaceId] = {
+        displayName: norm.displayName,
         tokens: 0,
         costCents: 0,
         lastActiveAt: new Date().toISOString(),
@@ -374,18 +379,7 @@ export class WorkspaceUsageTracker {
     workspaceId: string;
     displayName: string;
   }): { workspaceId: string; displayName: string } {
-    if (
-      match.workspaceId === "no-folder" ||
-      match.workspaceId === NO_WORKSPACE_ID ||
-      match.displayName === "(no folder)" ||
-      match.displayName === NO_WORKSPACE_LABEL
-    ) {
-      return { workspaceId: NO_WORKSPACE_ID, displayName: NO_WORKSPACE_LABEL };
-    }
-    return {
-      workspaceId: normalizeWorkspaceId(match.workspaceId),
-      displayName: match.displayName,
-    };
+    return canonicalizeWorkspaceIdentity(match);
   }
 
   /**
@@ -457,47 +451,156 @@ export class WorkspaceUsageTracker {
     data: WorkspaceStore,
     pendingFlags?: Map<string, boolean>
   ): WorkspaceStat[] {
-    // Merge duplicate ids after normalization.
-    const merged = new Map<string, WorkspaceStat>();
+    type Acc = WorkspaceStat & { fromAliasOnly: boolean };
+
+    // Merge alias ids (cursor-project / alternate paths) onto one row.
+    const byId = new Map<string, Acc>();
     for (const [workspaceId, v] of Object.entries(data.workspaces)) {
       const norm = this.normalizeIdentity({
         workspaceId,
         displayName: v.displayName,
       });
-      const prev = merged.get(norm.workspaceId);
+      const tokens = Math.round(v.tokens);
+      const costCents = Math.round(v.costCents * 100) / 100;
+      const alias = isCursorProjectId(workspaceId);
+      const flagged =
+        pendingFlags?.get(workspaceId) === true ||
+        pendingFlags?.get(norm.workspaceId) === true;
+      const estimated = alias || flagged;
+
+      const prev = byId.get(norm.workspaceId);
       if (!prev) {
-        const localPending = pendingFlags?.get(norm.workspaceId) === true;
-        merged.set(norm.workspaceId, {
+        byId.set(norm.workspaceId, {
           workspaceId: norm.workspaceId,
           displayName: norm.displayName,
-          tokens: Math.round(v.tokens),
-          costCents: Math.round(v.costCents * 100) / 100,
+          tokens,
+          costCents,
           lastActiveAt: v.lastActiveAt,
-          localPending,
-          tokensEstimated: localPending && Math.round(v.tokens) > 0,
+          localPending: estimated && tokens > 0 && costCents <= 0,
+          tokensEstimated: estimated && tokens > 0 && costCents <= 0,
+          fromAliasOnly: alias,
         });
         continue;
       }
-      prev.tokens += Math.round(v.tokens);
-      prev.costCents =
-        Math.round((prev.costCents + v.costCents) * 100) / 100;
-      if (Date.parse(v.lastActiveAt) > Date.parse(prev.lastActiveAt)) {
-        prev.lastActiveAt = v.lastActiveAt;
+
+      this.mergeWorkspaceAcc(prev, {
+        displayName: norm.displayName,
+        tokens,
+        costCents,
+        lastActiveAt: v.lastActiveAt,
+        estimated,
+        alias,
+      });
+    }
+
+    // Safety net: same display name (Usage_Dashboard vs Usage-Dashboard).
+    const byName = new Map<string, Acc>();
+    for (const row of byId.values()) {
+      const key = normalizeDisplayName(row.displayName);
+      const prev = byName.get(key);
+      if (!prev) {
+        byName.set(key, row);
+        continue;
       }
-      prev.displayName = norm.displayName;
-      if (pendingFlags?.get(norm.workspaceId) === true) {
-        prev.localPending = true;
-        prev.tokensEstimated = prev.tokens > 0;
+      this.mergeWorkspaceAcc(prev, {
+        displayName: preferDisplayName(prev.displayName, row.displayName),
+        tokens: row.tokens,
+        costCents: row.costCents,
+        lastActiveAt: row.lastActiveAt,
+        estimated: !!row.tokensEstimated,
+        alias: row.fromAliasOnly,
+      });
+      // Prefer a real file:/no-workspace id over a leftover alias id.
+      if (prev.fromAliasOnly && !row.fromAliasOnly) {
+        prev.workspaceId = row.workspaceId;
+        prev.fromAliasOnly = false;
       }
     }
 
-    return [...merged.values()].sort(
+    const stats = [...byName.values()].map(({ fromAliasOnly: _, ...rest }) => {
+      const localPending = !!rest.localPending;
+      return {
+        ...rest,
+        localPending,
+        tokensEstimated: localPending && rest.tokens > 0,
+      } satisfies WorkspaceStat;
+    });
+
+    // Persist collapsed keys so the next load does not revive duplicates.
+    const collapsed: WorkspaceStore["workspaces"] = {};
+    for (const s of stats) {
+      collapsed[s.workspaceId] = {
+        displayName: s.displayName,
+        tokens: s.tokens,
+        costCents: s.costCents,
+        lastActiveAt: s.lastActiveAt,
+      };
+    }
+    data.workspaces = collapsed;
+
+    return stats.sort(
       (a, b) =>
         Date.parse(b.lastActiveAt) - Date.parse(a.lastActiveAt) ||
         b.costCents - a.costCents ||
         b.tokens - a.tokens
     );
   }
+
+  /**
+   * Fold one workspace row into another. Alias/estimate totals do not stack
+   * on top of already-attributed API figures (same rule as same-id merge).
+   */
+  private mergeWorkspaceAcc(
+    into: WorkspaceStat & { fromAliasOnly: boolean },
+    from: {
+      displayName: string;
+      tokens: number;
+      costCents: number;
+      lastActiveAt: string;
+      estimated: boolean;
+      alias: boolean;
+    }
+  ): void {
+    const intoEstimated = !!into.tokensEstimated;
+    const fromEstimated = from.estimated;
+
+    if (intoEstimated && !fromEstimated) {
+      into.tokens = from.tokens;
+      into.costCents = from.costCents;
+      into.localPending = false;
+      into.tokensEstimated = false;
+      into.fromAliasOnly = false;
+    } else if (!intoEstimated && fromEstimated) {
+      // Keep attributed totals; estimates only fill empty rows.
+    } else {
+      into.tokens += from.tokens;
+      into.costCents =
+        Math.round((into.costCents + from.costCents) * 100) / 100;
+      if (into.tokens > 0 && into.costCents <= 0 && intoEstimated) {
+        into.localPending = true;
+        into.tokensEstimated = true;
+      }
+    }
+
+    if (Date.parse(from.lastActiveAt) > Date.parse(into.lastActiveAt)) {
+      into.lastActiveAt = from.lastActiveAt;
+    }
+    into.displayName = preferDisplayName(into.displayName, from.displayName);
+    if (!from.alias) {
+      into.fromAliasOnly = false;
+    }
+  }
+}
+
+function preferDisplayName(a: string, b: string): string {
+  // Prefer real folder names (underscores) over slug tails (hyphens).
+  if (a.includes("_") && !b.includes("_")) {
+    return a;
+  }
+  if (b.includes("_") && !a.includes("_")) {
+    return b;
+  }
+  return a.length >= b.length ? a : b;
 }
 
 /** conversationId / composerId / chatId — Cursor payloads vary by version. */

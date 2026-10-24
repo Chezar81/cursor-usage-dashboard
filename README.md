@@ -71,14 +71,14 @@ Every successful refresh writes durable files under Cursor’s extension global 
 
 | File | Purpose |
 | --- | --- |
-| `last-dashboard.json` | Latest dashboard view model (status bar + webview seed on startup) |
-| `workspace-usage.json` | Estimated per-workspace aggregates + open-window tracking |
-| `cache/raw-latest.json` | Last raw Cursor API + local scan payloads |
-| `cache/history/*.json` | Rolling snapshots of the dashboard (keeps the last ~60 refreshes) |
+| `last-dashboard.json` | Latest dashboard view (overwritten each refresh; seeds UI on startup) |
+| `workspace-usage.json` | Workspace estimates + open-window tracking (closed windows older than 30 days dropped) |
+| `cache/raw-latest.json` | Slim raw payloads (event lists omitted; ≤512 KB) |
+| `cache/history/YYYY-MM-DD.json` | One recovery snapshot per day (≤14 days, ≤2 MB total) |
 
-Writes are atomic (temp file → rename). On startup the extension loads `last-dashboard.json`
-immediately so a failed network refresh cannot blank the UI; history is a fallback if the
-primary cache file is missing or corrupt.
+Writes are atomic (temp → rename). Auto-refresh cannot bloat disk: history overwrites the
+same day’s file, legacy per-refresh history files are deleted on maintenance, orphaned
+`.tmp` files are cleaned, and raw event arrays are not stored.
 
 ## Privacy & caveats
 
