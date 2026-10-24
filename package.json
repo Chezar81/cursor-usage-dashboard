@@ -1,0 +1,78 @@
+{
+  "name": "cursor-usage-dashboard",
+  "displayName": "Cursor Usage Dashboard",
+  "description": "Personal Cursor usage dashboard: plan cycle, model breakdown, trends, and estimated per-workspace tracking.",
+  "version": "0.2.2",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cursorUsage.openDashboard",
+        "title": "Cursor Usage: Open Dashboard"
+      },
+      {
+        "command": "cursorUsage.refresh",
+        "title": "Cursor Usage: Refresh"
+      },
+      {
+        "command": "cursorUsage.setSessionToken",
+        "title": "Cursor Usage: Set Session Token (manual fallback)"
+      },
+      {
+        "command": "cursorUsage.clearWorkspaceStats",
+        "title": "Cursor Usage: Clear Local Workspace Stats"
+      }
+    ],
+    "configuration": {
+      "title": "Cursor Usage Dashboard",
+      "properties": {
+        "cursorUsage.refreshIntervalMinutes": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Auto-refresh interval in minutes for the status bar and open dashboard (while Cursor is focused). Default: 2."
+        },
+        "cursorUsage.currency": {
+          "type": "string",
+          "enum": [
+            "USD",
+            "EUR"
+          ],
+          "default": "USD",
+          "description": "Display currency for costs. Cursor bills in USD; EUR uses the configured exchange rate."
+        },
+        "cursorUsage.eurPerUsd": {
+          "type": "number",
+          "default": 0.92,
+          "minimum": 0.01,
+          "maximum": 10,
+          "description": "EUR per 1 USD when displaying Euro. Adjust to match a current rate."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "compile": "npm run build",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3"
+  }
+}
