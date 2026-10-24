@@ -332,6 +332,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       font-size: 0.78rem;
       color: var(--muted);
     }
+    .stat-sub .stat-em {
+      color: var(--fg);
+      font-weight: 650;
+      font-variant-numeric: tabular-nums;
+    }
     .badge {
       display: inline-block;
       margin-top: 6px;
@@ -822,20 +827,19 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         const trend = data.trend || {};
         const windowName =
           trend.rangeKind === "weekly" ? "weekly window" : "billing window";
-        const lastApiLabel = trend.lastEventAt
-          ? "Newest usage event " +
-            fmtDate(trend.lastEventAt) +
-            " (" +
-            fmtAgo(trend.lastEventAt) +
-            ")"
-          : "No usage events in this " + windowName + " yet";
-        const lastApiClause = trend.lastEventAt
-          ? "newest event " +
-            fmtDate(trend.lastEventAt) +
-            " (" +
-            fmtAgo(trend.lastEventAt) +
-            ")"
-          : "none in this " + windowName;
+        const lastApiWhen = trend.lastEventAt
+          ? fmtDate(trend.lastEventAt) + " (" + fmtAgo(trend.lastEventAt) + ")"
+          : "";
+        const lastApiLabel = trend.lastEventBeforeWindow && lastApiWhen
+          ? "Newest API event is before this " + windowName + ": " + lastApiWhen
+          : lastApiWhen
+            ? "Newest usage event " + lastApiWhen
+            : "No usage events in this " + windowName + " yet";
+        const lastApiClause = trend.lastEventBeforeWindow && lastApiWhen
+          ? "newest API event is before this " + windowName + " (" + lastApiWhen + ")"
+          : lastApiWhen
+            ? "newest event " + lastApiWhen
+            : "none in this " + windowName;
         const staleMsg =
           !errMsg && trend.eventsStale
             ? trend.pendingConversations > 0
@@ -926,9 +930,18 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       }
 
       const onDemandText = fmtCents(p.onDemandUsedCents ?? 0);
-      const onDemandSub = p.onDemandEnabled
-        ? "On-demand enabled"
-        : "Monthly additional usage · not set / off";
+      const onDemandSub = p.prepaidBilling
+        ? "used this month"
+        : p.onDemandEnabled
+          ? "used this month · on-demand on"
+          : "used this month · additional usage not set";
+      const creditsCents = p.creditsAvailableCents;
+      const creditsSub =
+        creditsCents != null && Number.isFinite(creditsCents)
+          ? '<div class="stat-sub">Credits available · <span class="stat-em">' +
+            fmtCents(creditsCents) +
+            "</span></div>"
+          : "";
 
       document.getElementById("plan-stats").innerHTML =
         '<div class="stat"><div class="stat-label">Plan</div>' +
@@ -939,7 +952,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         "</div>" +
         '<div class="stat"><div class="stat-label">Account balance</div>' +
         '<div class="stat-value">' + onDemandText + "</div>" +
-        '<div class="stat-sub">' + onDemandSub + "</div></div>" +
+        '<div class="stat-sub">' + onDemandSub + "</div>" +
+        creditsSub +
+        "</div>" +
         '<div class="stat"><div class="stat-label">' +
         escapeHtml(p.includedLabel || "Included usage") +
         "</div>" +

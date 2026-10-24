@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { buildDashboardData, resolveCycleRange } from "./aggregator";
+import { asDateMs, buildDashboardData, resolveCycleRange } from "./aggregator";
 import {
   formatMoneyFromUsdCents,
   getCurrencyPrefs,
@@ -240,10 +240,13 @@ async function refresh(
       return;
     }
 
-    const me = await client.getAuthMe();
-    const summary = await client.getUsageSummary();
-    const period = await client.getCurrentPeriodUsage();
-    const sand = await client.getSandUsageStatus();
+    const [me, summary, period, sand, prepaid] = await Promise.all([
+      client.getAuthMe(),
+      client.getUsageSummary(),
+      client.getCurrentPeriodUsage(),
+      client.getSandUsageStatus(),
+      client.getUserPrepaidBilling(),
+    ]);
     const { startMs, endMs, rangeKind } = resolveCycleRange(
       summary,
       period,
@@ -261,6 +264,7 @@ async function refresh(
 
     let aggregated;
     let filtered;
+    let eventsAuthoritative = false;
     try {
       aggregated = await client.getAggregatedUsageEvents({
         startDate: startMs,
@@ -279,6 +283,7 @@ async function refresh(
         endDate: endMs,
         pageSize: 500,
       });
+      eventsAuthoritative = true;
     } catch (e) {
       if (e instanceof CursorAuthError) {
         throw e;
@@ -286,6 +291,20 @@ async function refresh(
     }
 
     const events = filtered?.usageEventsDisplay ?? [];
+    let latestKnownEventMs: number | undefined;
+    let latestPeekOk = false;
+    if (eventsAuthoritative && events.length === 0) {
+      const peek = await client.peekLatestUsageEvent();
+      latestPeekOk = peek.ok;
+      if (peek.ok && peek.event) {
+        latestKnownEventMs = asDateMs(peek.event.timestamp);
+      }
+    }
+    const clearStaleBilled =
+      eventsAuthoritative &&
+      events.length === 0 &&
+      latestPeekOk &&
+      (latestKnownEventMs === undefined || latestKnownEventMs < startMs);
     const data = buildDashboardData({
       summary,
       me,
@@ -293,9 +312,11 @@ async function refresh(
       filtered,
       sand,
       period,
+      prepaid,
       rangeStartMs: startMs,
       rangeEndMs: endMs,
       rangeKind,
+      latestKnownEventMs,
       localConversations: localScan.conversations,
       localModels,
       workspaces: [],
@@ -311,6 +332,7 @@ async function refresh(
       costCents: data.totals.costCents,
       localConversations: localScan.conversations,
       rangeStartMs: startMs,
+      clearStaleBilled,
     });
     data.contextUsage = await estimateContextUsage(
       vscode.workspace.workspaceFolders
@@ -325,6 +347,7 @@ async function refresh(
         summary,
         period,
         sand,
+        prepaid,
         aggregated,
         filtered,
         localConversations: localScan.conversations,
@@ -385,12 +408,16 @@ function updateStatusBar(data: DashboardData): void {
   }
   const pct = data.plan?.includedPercentUsed;
   const onDemand = data.plan?.onDemandUsedCents;
+  const credits = data.plan?.creditsAvailableCents;
   const parts: string[] = [];
   if (pct != null && Number.isFinite(pct)) {
     parts.push(`${pct.toFixed(0)}%`);
   }
   if (onDemand != null && onDemand > 0) {
     parts.push(`+${formatMoneyFromUsdCents(onDemand, getCurrencyPrefs())}`);
+  }
+  if (credits != null && credits > 0) {
+    parts.push(`${formatMoneyFromUsdCents(credits, getCurrencyPrefs())} cr`);
   }
   const label = parts.length ? parts.join(" ") : "ok";
   statusBar.text = `$(dashboard) Usage: ${label}`;

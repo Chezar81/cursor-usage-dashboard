@@ -262,7 +262,8 @@ function pickLatestModelPerConversation(rows: RawRow[]): LocalModelActivity[] {
 export function formatLocalModelLabel(raw: string): string {
   const t = raw.trim();
   if (!t || t.toLowerCase() === "default") {
-    return "Default";
+    // Cursor stores Auto picker as "default"; exact routed model only appears in usage API.
+    return "Auto (Default)";
   }
   if (t.toLowerCase() === "unknown") {
     return "Unknown";

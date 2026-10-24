@@ -117,6 +117,22 @@ export interface SandUsageStatus {
   [key: string]: unknown;
 }
 
+/**
+ * Prepaid wallet from get-user-prepaid-billing — same source as
+ * grok.com/dashboard “Account balance” / “Credits available”.
+ */
+export interface UserPrepaidBilling {
+  billingMode?: string;
+  eligible?: boolean;
+  /** Credits available (USD cents; Connect RPC may send string). */
+  availableCents?: number | string;
+  fundedCents?: number | string;
+  spentCents?: number | string;
+  spentThisMonthCents?: number | string;
+  hasPaymentMethod?: boolean;
+  [key: string]: unknown;
+}
+
 export interface ModelBreakdown {
   /** Selected / requested model (Cursor `modelIntent`). */
   modelIntent: string;
@@ -167,6 +183,11 @@ export type TrendRangeKind = "weekly" | "monthly";
 export interface TrendMeta {
   rangeKind: TrendRangeKind;
   lastEventAt?: string;
+  /**
+   * True when `lastEventAt` is the newest event Cursor has published and it
+   * falls before the chart window (the in-window query was empty).
+   */
+  lastEventBeforeWindow?: boolean;
   lastLocalAt?: string;
   pendingConversations: number;
   matchedConversations: number;
@@ -190,6 +211,15 @@ export interface PlanView {
   onDemandUsedCents: number | null;
   onDemandEnabled: boolean;
   onDemandLimitCents?: number | null;
+  /**
+   * Prepaid credits available (USD cents) — matches grok.com
+   * “Credits available” from get-user-prepaid-billing.
+   */
+  creditsAvailableCents?: number | null;
+  /** Total funded into the prepaid wallet when known (USD cents). */
+  creditsTotalCents?: number | null;
+  /** True when account uses prepaid billing (X / Premium merged plans). */
+  prepaidBilling?: boolean;
   displayMessage?: string;
   sandPool?: {
     used: number;
@@ -282,6 +312,12 @@ export interface WorkspaceStore {
       tokens: number;
       costCents: number;
       lastActiveAt: string;
+      /**
+       * True when `tokens` is a local transcript estimate (chars÷4), not
+       * billed API usage. Persisted so pending rows keep updating and are
+       * not mistaken for final attribution after reload.
+       */
+      tokensEstimated?: boolean;
     }
   >;
   /**

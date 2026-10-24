@@ -1,10 +1,12 @@
 import type {
   AggregatedUsageEventsResponse,
   AuthMe,
+  FilteredUsageEvent,
   FilteredUsageEventsResponse,
   PeriodUsage,
   SandUsageStatus,
   UsageSummary,
+  UserPrepaidBilling,
 } from "./types";
 
 const BASE = "https://cursor.com";
@@ -121,6 +123,29 @@ export class CursorDashboardClient {
     };
   }
 
+  /**
+   * Newest usage event with no date filter. The dashboard returns newest first,
+   * so page 1 is enough to tell whether activity exists outside the chart window.
+   * `ok: false` means the request failed; `event: null` means the account has none.
+   */
+  async peekLatestUsageEvent(): Promise<
+    | { ok: true; event: FilteredUsageEvent | null }
+    | { ok: false }
+  > {
+    try {
+      const batch = await this.postJson<FilteredUsageEventsResponse>(
+        "/api/dashboard/get-filtered-usage-events",
+        { page: 1, pageSize: 1 }
+      );
+      return { ok: true, event: batch.usageEventsDisplay?.[0] ?? null };
+    } catch (e) {
+      if (e instanceof CursorAuthError) {
+        throw e;
+      }
+      return { ok: false };
+    }
+  }
+
   /** Fallback for cycle bounds when usage-summary lacks them. */
   async getCurrentPeriodUsage(): Promise<PeriodUsage | null> {
     try {
@@ -141,6 +166,24 @@ export class CursorDashboardClient {
     try {
       return await this.postJson<SandUsageStatus>(
         "/api/dashboard/get-sand-usage-status",
+        {}
+      );
+    } catch (e) {
+      if (e instanceof CursorAuthError) {
+        throw e;
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Prepaid wallet (grok.com/dashboard “Credits available” / monthly spend).
+   * Same payload as DashboardService/GetUserPrepaidBilling.
+   */
+  async getUserPrepaidBilling(): Promise<UserPrepaidBilling | null> {
+    try {
+      return await this.postJson<UserPrepaidBilling>(
+        "/api/dashboard/get-user-prepaid-billing",
         {}
       );
     } catch (e) {

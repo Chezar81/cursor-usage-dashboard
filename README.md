@@ -2,7 +2,7 @@
 
 Personal Cursor usage dashboard (webview + status bar) for your own account:
 
-- Current plan / cycle usage (included pool %, on-demand, reset date)
+- Current plan / cycle usage (included pool %, prepaid credits from grok.com billing, reset date)
 - Model breakdown (tokens + cost)
 - **Estimated** context-window breakdown (rules, skills, MCP, conversation, …) from local Cursor/project files
 - Daily trend charts (tokens or spend), aligned with the weekly included window when that drives the plan ring
@@ -62,7 +62,7 @@ Cursor does not attribute usage events to folders. This extension estimates loca
 
 The dashboard labels this **Estimated (local)**. Chats that never left a local transcript (or ran on another machine) cannot be attributed. Agent chats with no folder open show up as **No workspace**. Filtered usage events are paginated so recent chats are not dropped after the first API page.
 
-Token counts come from Cursor’s usage events API. If a folder shows **0** while you are chatting there, those events may not be in the API response yet (or lack a matching `conversationId`) — the row is still listed because the folder is open.
+Token counts come from Cursor’s usage events API when events include a matching `conversationId`. Until then the row shows a **Pending API** transcript estimate (`chars÷4`), which refreshes on each dashboard refresh. If a folder shows **0** while you are chatting there, those chats may lack a local transcript match — the row is still listed because the folder is open.
 
 ## Local cache (data loss protection)
 

@@ -125,16 +125,24 @@ export class WorkspaceUsageTracker {
       costCents: number;
       localConversations?: LocalConversationActivity[];
       rangeStartMs?: number;
+      /**
+       * In-window fetch succeeded with no events, and the newest event Cursor
+       * has published is before this window. Drop previous-cycle billed rows.
+       */
+      clearStaleBilled?: boolean;
     }
   ): Promise<WorkspaceStat[]> {
     const data = await this.store.loadWorkspaceStore();
     this.migrateLegacyNoFolder(data);
+    this.migrateEstimatedFlags(data);
     const nowIso = new Date().toISOString();
     const snap = snapshotFromEvents(events);
     const pendingFlags = new Map<string, boolean>();
 
     // Don't wipe existing estimates when the events API returns nothing.
-    if (events.length > 0) {
+    // A confirmed empty window still drops previous-cycle billed rows so
+    // those dollars are not shown as this cycle's usage.
+    if (events.length > 0 || totalsOverride?.clearStaleBilled) {
       const byConversation = buildConversationWorkspaceMap();
       const rebuilt: WorkspaceStore["workspaces"] = {};
 
@@ -170,10 +178,12 @@ export class WorkspaceUsageTracker {
           tokens: 0,
           costCents: 0,
           lastActiveAt: activeAt,
+          tokensEstimated: false,
         };
         entry.displayName = normalized.displayName;
         entry.tokens += tokens;
         entry.costCents += cost;
+        entry.tokensEstimated = false;
         const prev = Date.parse(entry.lastActiveAt);
         const next = Date.parse(activeAt);
         if (!Number.isFinite(prev) || (Number.isFinite(next) && next >= prev)) {
@@ -183,7 +193,17 @@ export class WorkspaceUsageTracker {
         pendingFlags.set(normalized.workspaceId, false);
       }
 
-      data.workspaces = rebuilt;
+      if (events.length === 0) {
+        const kept: WorkspaceStore["workspaces"] = {};
+        for (const [id, entry] of Object.entries(data.workspaces)) {
+          if (entry.tokensEstimated === true) {
+            kept[id] = entry;
+          }
+        }
+        data.workspaces = kept;
+      } else {
+        data.workspaces = rebuilt;
+      }
     }
 
     this.mergeLocalPendingWorkspaces(
@@ -206,13 +226,16 @@ export class WorkspaceUsageTracker {
     if (data.windows.length > 500) {
       data.windows = data.windows.slice(-300);
     }
+    // Collapse aliases first, then persist so reloads keep one row per folder
+    // and retain tokensEstimated (pending vs billed).
+    const stats = this.toStats(data, pendingFlags);
     await this.store.saveWorkspaceStore(data);
-    return this.toStats(data, pendingFlags);
+    return stats;
   }
 
   /**
    * Surface workspaces that have local chats in-range but no API tokens yet.
-   * Fills a rough transcript token estimate until the API attributes usage.
+   * Keeps refreshing the transcript token estimate until the API attributes usage.
    */
   private mergeLocalPendingWorkspaces(
     data: WorkspaceStore,
@@ -262,30 +285,45 @@ export class WorkspaceUsageTracker {
           tokens: est.estimatedTokens,
           costCents: 0,
           lastActiveAt: activeAt,
+          tokensEstimated: true,
         };
         pendingFlags.set(workspaceId, true);
         continue;
       }
+
+      // API-attributed rows keep billed totals; estimates only fill/refresh
+      // rows that are still provisional.
+      if (existing.tokensEstimated === false) {
+        existing.displayName = est.displayName;
+        const prev = Date.parse(existing.lastActiveAt);
+        const next = Date.parse(activeAt);
+        if (!Number.isFinite(prev) || (Number.isFinite(next) && next >= prev)) {
+          existing.lastActiveAt = activeAt;
+        }
+        continue;
+      }
+
       existing.displayName = est.displayName;
+      existing.tokens = est.estimatedTokens;
+      existing.costCents = 0;
+      existing.tokensEstimated = true;
       const prev = Date.parse(existing.lastActiveAt);
       const next = Date.parse(activeAt);
       if (!Number.isFinite(prev) || (Number.isFinite(next) && next >= prev)) {
         existing.lastActiveAt = activeAt;
       }
-      // Only replace with the estimate when API has not attributed tokens yet.
-      if ((existing.tokens ?? 0) <= 0 && (existing.costCents ?? 0) <= 0) {
-        existing.tokens = est.estimatedTokens;
-        pendingFlags.set(workspaceId, true);
-      }
+      pendingFlags.set(workspaceId, true);
     }
   }
 
   async getStats(): Promise<WorkspaceStat[]> {
     const data = await this.store.loadWorkspaceStore();
     this.migrateLegacyNoFolder(data);
+    this.migrateEstimatedFlags(data);
     this.ensureOpenWorkspaces(data);
+    const stats = this.toStats(data);
     await this.store.saveWorkspaceStore(data);
-    return this.toStats(data);
+    return stats;
   }
 
   async clear(): Promise<void> {
@@ -336,6 +374,24 @@ export class WorkspaceUsageTracker {
     for (const w of data.windows) {
       if (!w.endedAt) {
         ensure(w.workspaceId, w.displayName);
+      }
+    }
+  }
+
+  /**
+   * Older stores had no tokensEstimated flag, so local estimates looked like
+   * final billed totals after reload and stopped updating. Infer pending when
+   * the row has tokens but no API cost yet.
+   */
+  private migrateEstimatedFlags(data: WorkspaceStore): void {
+    for (const entry of Object.values(data.workspaces)) {
+      if (entry.tokensEstimated !== undefined) {
+        continue;
+      }
+      if ((entry.tokens ?? 0) > 0 && (entry.costCents ?? 0) <= 0) {
+        entry.tokensEstimated = true;
+      } else if ((entry.tokens ?? 0) > 0 || (entry.costCents ?? 0) > 0) {
+        entry.tokensEstimated = false;
       }
     }
   }
@@ -466,18 +522,26 @@ export class WorkspaceUsageTracker {
       const flagged =
         pendingFlags?.get(workspaceId) === true ||
         pendingFlags?.get(norm.workspaceId) === true;
-      const estimated = alias || flagged;
+      const apiAttributed =
+        pendingFlags?.get(workspaceId) === false ||
+        pendingFlags?.get(norm.workspaceId) === false ||
+        v.tokensEstimated === false;
+      // Prefer explicit store/API attribution over alias/pending heuristics.
+      const estimated =
+        !apiAttributed &&
+        (alias || flagged || v.tokensEstimated === true);
 
       const prev = byId.get(norm.workspaceId);
       if (!prev) {
+        const pending = estimated && tokens > 0;
         byId.set(norm.workspaceId, {
           workspaceId: norm.workspaceId,
           displayName: norm.displayName,
           tokens,
           costCents,
           lastActiveAt: v.lastActiveAt,
-          localPending: estimated && tokens > 0 && costCents <= 0,
-          tokensEstimated: estimated && tokens > 0 && costCents <= 0,
+          localPending: pending,
+          tokensEstimated: pending,
           fromAliasOnly: alias,
         });
         continue;
@@ -518,11 +582,11 @@ export class WorkspaceUsageTracker {
     }
 
     const stats = [...byName.values()].map(({ fromAliasOnly: _, ...rest }) => {
-      const localPending = !!rest.localPending;
+      const localPending = !!rest.tokensEstimated && rest.tokens > 0;
       return {
         ...rest,
         localPending,
-        tokensEstimated: localPending && rest.tokens > 0,
+        tokensEstimated: localPending,
       } satisfies WorkspaceStat;
     });
 
@@ -534,7 +598,12 @@ export class WorkspaceUsageTracker {
         tokens: s.tokens,
         costCents: s.costCents,
         lastActiveAt: s.lastActiveAt,
+        tokensEstimated: s.tokensEstimated === true ? true : false,
       };
+      // Open folders with 0 tokens are neither estimated nor attributed yet.
+      if (s.tokens <= 0 && s.costCents <= 0) {
+        delete collapsed[s.workspaceId].tokensEstimated;
+      }
     }
     data.workspaces = collapsed;
 
@@ -572,14 +641,21 @@ export class WorkspaceUsageTracker {
       into.fromAliasOnly = false;
     } else if (!intoEstimated && fromEstimated) {
       // Keep attributed totals; estimates only fill empty rows.
+    } else if (intoEstimated && fromEstimated) {
+      // Both provisional: keep the larger fresh estimate (do not double-count
+      // alias + file:// copies of the same local chats).
+      if (from.tokens >= into.tokens) {
+        into.tokens = from.tokens;
+      }
+      into.costCents = 0;
+      into.localPending = into.tokens > 0;
+      into.tokensEstimated = into.tokens > 0;
     } else {
       into.tokens += from.tokens;
       into.costCents =
         Math.round((into.costCents + from.costCents) * 100) / 100;
-      if (into.tokens > 0 && into.costCents <= 0 && intoEstimated) {
-        into.localPending = true;
-        into.tokensEstimated = true;
-      }
+      into.localPending = false;
+      into.tokensEstimated = false;
     }
 
     if (Date.parse(from.lastActiveAt) > Date.parse(into.lastActiveAt)) {

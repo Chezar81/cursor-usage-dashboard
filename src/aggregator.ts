@@ -20,6 +20,7 @@ import type {
   TrendMeta,
   TrendRangeKind,
   UsageSummary,
+  UserPrepaidBilling,
   WorkspaceStat,
 } from "./types";
 
@@ -107,11 +108,49 @@ function normalizePercent(pct: number | undefined | null): number | null {
   return pct > 0 && pct <= 1 ? pct * 100 : pct;
 }
 
+/** Parse Connect-RPC int64 that may arrive as number or string. */
+function centsField(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) {
+    return Math.round(v);
+  }
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  }
+  return null;
+}
+
+/** Map get-user-prepaid-billing to the grok.com “Credits available” figures. */
+export function resolvePrepaidCredits(
+  prepaid: UserPrepaidBilling | null | undefined
+): {
+  availableCents: number | null;
+  totalCents: number | null;
+  spentThisMonthCents: number | null;
+  prepaidBilling: boolean;
+} {
+  if (!prepaid || prepaid.eligible !== true) {
+    return {
+      availableCents: null,
+      totalCents: null,
+      spentThisMonthCents: null,
+      prepaidBilling: false,
+    };
+  }
+  return {
+    availableCents: centsField(prepaid.availableCents),
+    totalCents: centsField(prepaid.fundedCents),
+    spentThisMonthCents: centsField(prepaid.spentThisMonthCents),
+    prepaidBilling: true,
+  };
+}
+
 export function buildPlanView(
   summary: UsageSummary | undefined,
   me: AuthMe | undefined,
   sand: SandUsageStatus | null | undefined,
-  period: PeriodUsage | null | undefined
+  period: PeriodUsage | null | undefined,
+  prepaid?: UserPrepaidBilling | null
 ): PlanView {
   const individual = summary?.individualUsage;
   const plan = individual?.plan ?? summary?.planUsage;
@@ -190,6 +229,12 @@ export function buildPlanView(
   const weeklyEnd = toIsoMaybe(sand?.nextResetTimestampUtc);
   const monthStart = toIsoMaybe(summary?.billingCycleStart) ?? toIsoMaybe(period?.billingCycleStart);
   const monthEnd = toIsoMaybe(summary?.billingCycleEnd) ?? toIsoMaybe(period?.billingCycleEnd);
+  const credits = resolvePrepaidCredits(prepaid);
+  // On prepaid (Grok/X) plans, “used this month” is prepaid spend — same as grok.com.
+  const balanceUsedCents =
+    credits.prepaidBilling && credits.spentThisMonthCents != null
+      ? credits.spentThisMonthCents
+      : onDemandUsedCents ?? 0;
 
   return {
     membershipType: planName,
@@ -202,10 +247,13 @@ export function buildPlanView(
     includedUsed,
     includedLimit,
     includedLabel,
-    onDemandUsedCents: onDemandUsedCents ?? 0,
+    onDemandUsedCents: balanceUsedCents,
     onDemandEnabled: onDemand?.enabled === true,
     onDemandLimitCents:
       onDemand?.limit == null ? null : Math.round(num(onDemand.limit) * 100),
+    creditsAvailableCents: credits.availableCents,
+    creditsTotalCents: credits.totalCents,
+    prepaidBilling: credits.prepaidBilling,
     displayMessage:
       (typeof period?.displayMessage === "string" ? period.displayMessage : undefined) ||
       (typeof summary?.autoModelSelectedDisplayMessage === "string"
@@ -509,6 +557,8 @@ export function buildTrendMeta(input: {
   rangeKind: TrendRangeKind;
   includedPercentUsed: number | null;
   rangeStartMs: number;
+  /** Newest event Cursor has published, even if it is outside the chart window. */
+  latestKnownEventMs?: number;
 }): TrendMeta {
   const matchedIds = apiConversationIds(input.events);
   let lastEventMs: number | undefined;
@@ -534,6 +584,12 @@ export function buildTrendMeta(input: {
     }
   }
 
+  let lastEventBeforeWindow = false;
+  if (lastEventMs === undefined && input.latestKnownEventMs !== undefined) {
+    lastEventMs = input.latestKnownEventMs;
+    lastEventBeforeWindow = input.latestKnownEventMs < input.rangeStartMs;
+  }
+
   const pendingConversations = pending.length;
   const matchedConversations = matchedIds.size;
   const hasApiTokens = input.daily.some((d) => d.tokens > 0);
@@ -552,7 +608,11 @@ export function buildTrendMeta(input: {
   );
   parts.push(`${input.daily.length} days`);
   if (lastEventMs !== undefined) {
-    parts.push(`last API event ${formatShortWhen(lastEventMs)}`);
+    parts.push(
+      lastEventBeforeWindow
+        ? `last API event ${formatShortWhen(lastEventMs)} (before this window)`
+        : `last API event ${formatShortWhen(lastEventMs)}`
+    );
   } else {
     parts.push("no API token events yet");
   }
@@ -578,6 +638,7 @@ export function buildTrendMeta(input: {
     pendingConversations,
     matchedConversations,
     eventsStale,
+    lastEventBeforeWindow,
     note: parts.join(" · "),
   };
 }
@@ -633,9 +694,12 @@ export function buildDashboardData(input: {
   filtered?: FilteredUsageEventsResponse;
   sand?: SandUsageStatus | null;
   period?: PeriodUsage | null;
+  prepaid?: UserPrepaidBilling | null;
   rangeStartMs: number;
   rangeEndMs: number;
   rangeKind: TrendRangeKind;
+  /** Newest published usage event, used when this window's event list is empty. */
+  latestKnownEventMs?: number;
   localConversations?: LocalConversationActivity[];
   localModels?: LocalModelActivity[];
   workspaces: WorkspaceStat[];
@@ -678,7 +742,13 @@ export function buildDashboardData(input: {
       }
     : totalsFromModels(apiModels);
 
-  const plan = buildPlanView(input.summary, input.me, input.sand, input.period);
+  const plan = buildPlanView(
+    input.summary,
+    input.me,
+    input.sand,
+    input.period,
+    input.prepaid
+  );
   const daily = dailyFromEvents(
     events,
     input.rangeStartMs,
@@ -692,6 +762,7 @@ export function buildDashboardData(input: {
     rangeKind: input.rangeKind,
     includedPercentUsed: plan.includedPercentUsed,
     rangeStartMs: input.rangeStartMs,
+    latestKnownEventMs: input.latestKnownEventMs,
   });
 
   return {

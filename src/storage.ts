@@ -32,6 +32,7 @@ export interface RawDashboardSnapshot {
   summary?: unknown;
   period?: unknown;
   sand?: unknown;
+  prepaid?: unknown;
   aggregated?: unknown;
   filtered?: unknown;
   localConversations?: unknown;
