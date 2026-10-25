@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 import { setAppearance, type DashboardAppearance } from "./appearance";
-import { asDateMs, buildDashboardData, resolveCycleRange } from "./aggregator";
+import {
+  asDateMs,
+  buildDashboardData,
+  filterEventsToRange,
+  resolveCycleRange,
+} from "./aggregator";
 import { watchBundleReload } from "./bundleReload";
 import {
   formatMoneyFromUsdCents,
@@ -271,7 +276,7 @@ async function refresh(
       sinceMs: startMs - 2 * 86400000,
     });
     const localModels = scanLocalModelActivity({
-      sinceMs: startMs,
+      sinceMs: startMs - 2 * 86400000,
       untilMs: endMs,
     });
 
@@ -290,12 +295,20 @@ async function refresh(
       // Best-effort: continue with filtered events.
     }
 
+    let usageEventsFetchStrategy:
+      | "primary"
+      | "primary-seconds"
+      | "wide-30d"
+      | "unbounded"
+      | "empty" = "empty";
     try {
-      filtered = await client.getAllFilteredUsageEvents({
+      const loaded = await client.getAllFilteredUsageEventsWithFallback({
         startDate: startMs,
         endDate: endMs,
         pageSize: 500,
       });
+      filtered = loaded.response;
+      usageEventsFetchStrategy = loaded.fetchStrategy;
       eventsAuthoritative = true;
     } catch (e) {
       if (e instanceof CursorAuthError) {
@@ -303,7 +316,19 @@ async function refresh(
       }
     }
 
-    const events = filtered?.usageEventsDisplay ?? [];
+    let events = filtered?.usageEventsDisplay ?? [];
+    if (
+      usageEventsFetchStrategy === "primary-seconds" ||
+      usageEventsFetchStrategy === "wide-30d" ||
+      usageEventsFetchStrategy === "unbounded"
+    ) {
+      events = filterEventsToRange(events, startMs, endMs);
+      filtered = {
+        ...filtered,
+        usageEventsDisplay: events,
+        totalUsageEventsCount: events.length,
+      };
+    }
     let latestKnownEventMs: number | undefined;
     let latestPeekOk = false;
     if (eventsAuthoritative && events.length === 0) {
@@ -330,6 +355,7 @@ async function refresh(
       rangeEndMs: endMs,
       rangeKind,
       latestKnownEventMs,
+      usageEventsFetchStrategy,
       localConversations: localScan.conversations,
       localModels,
       workspaces: [],

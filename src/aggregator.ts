@@ -1,4 +1,8 @@
 import { dayKeyLocal, eachLocalDayKeys } from "./dates";
+import {
+  modelsGroupedByRoutedFromAggregated,
+  modelsGroupedByRoutedModel,
+} from "./modelRouting";
 import type { LocalConversationActivity } from "./localActivity";
 import { apiConversationIds, extractConversationId } from "./localActivity";
 import {
@@ -36,6 +40,21 @@ function num(v: unknown): number {
     return Number.isFinite(n) ? n : 0;
   }
   return 0;
+}
+
+/** Keep only events whose timestamp falls in the dashboard window (inclusive). */
+export function filterEventsToRange(
+  events: FilteredUsageEvent[],
+  startMs: number,
+  endMs: number
+): FilteredUsageEvent[] {
+  return events.filter((ev) => {
+    const ms = asDateMs(ev.timestamp);
+    if (ms === undefined) {
+      return true;
+    }
+    return ms >= startMs && ms <= endMs;
+  });
 }
 
 export function asDateMs(v: string | number | undefined | null): number | undefined {
@@ -733,6 +752,7 @@ export function buildTrendMeta(input: {
   rangeStartMs: number;
   /** Newest event Cursor has published, even if it is outside the chart window. */
   latestKnownEventMs?: number;
+  usageEventsFetchStrategy?: TrendMeta["usageEventsFetchStrategy"];
 }): TrendMeta {
   const matchedIds = apiConversationIds(input.events);
   let lastEventMs: number | undefined;
@@ -798,6 +818,18 @@ export function buildTrendMeta(input: {
   if (matchedConversations > 0) {
     parts.push(`${matchedConversations} matched`);
   }
+  if (input.usageEventsFetchStrategy && input.usageEventsFetchStrategy !== "primary") {
+    parts.push(`events loaded via ${input.usageEventsFetchStrategy}`);
+  }
+  if (
+    input.events.length === 0 &&
+    planSuggestsUsage &&
+    input.usageEventsFetchStrategy === "empty"
+  ) {
+    parts.push(
+      "detail API returned no rows (pool % uses a different endpoint — model stats stay local until Cursor publishes events)"
+    );
+  }
 
   return {
     rangeKind: input.rangeKind,
@@ -813,6 +845,7 @@ export function buildTrendMeta(input: {
     matchedConversations,
     eventsStale,
     lastEventBeforeWindow,
+    usageEventsFetchStrategy: input.usageEventsFetchStrategy,
     note: parts.join(" · "),
   };
 }
@@ -874,6 +907,7 @@ export function buildDashboardData(input: {
   rangeKind: TrendRangeKind;
   /** Newest published usage event, used when this window's event list is empty. */
   latestKnownEventMs?: number;
+  usageEventsFetchStrategy?: TrendMeta["usageEventsFetchStrategy"];
   localConversations?: LocalConversationActivity[];
   localModels?: LocalModelActivity[];
   workspaces: WorkspaceStat[];
@@ -884,11 +918,11 @@ export function buildDashboardData(input: {
   const events = input.filtered?.usageEventsDisplay ?? [];
   const localConversations = input.localConversations ?? [];
   const localModels = input.localModels ?? [];
-  // Prefer per-event rows when available so intent vs actual model both surface.
+  // Group by routed model so Auto sessions show what actually served each request.
   const apiModels =
     events.length > 0
-      ? modelsFromEvents(events)
-      : modelsFromAggregated(input.aggregated);
+      ? modelsGroupedByRoutedModel(events)
+      : modelsGroupedByRoutedFromAggregated(input.aggregated?.aggregations ?? []);
   const models = mergeModelsWithLocal({
     apiModels,
     events,
@@ -944,6 +978,7 @@ export function buildDashboardData(input: {
     includedPercentUsed: plan.includedPercentUsed,
     rangeStartMs: input.rangeStartMs,
     latestKnownEventMs: input.latestKnownEventMs,
+    usageEventsFetchStrategy: input.usageEventsFetchStrategy,
   });
 
   return {
@@ -975,22 +1010,20 @@ export function resolveCycleRange(
 
   const weeklyStart = asDateMs(sand?.currentPeriodStart);
   if (weeklyStart !== undefined) {
-    const weeklyEnd = asDateMs(sand?.nextResetTimestampUtc);
     return {
       startMs: weeklyStart,
-      endMs: weeklyEnd !== undefined ? Math.min(weeklyEnd, endMs) : endMs,
+      // Always fetch through now; a stale nextReset must not clip today's events.
+      endMs,
       rangeKind: "weekly",
     };
   }
 
   const startParsed =
     asDateMs(summary?.billingCycleStart) ?? asDateMs(period?.billingCycleStart);
-  const endParsed =
-    asDateMs(summary?.billingCycleEnd) ?? asDateMs(period?.billingCycleEnd);
   if (startParsed !== undefined) {
     return {
       startMs: startParsed,
-      endMs: endParsed !== undefined ? Math.min(endParsed, endMs) : endMs,
+      endMs,
       rangeKind: "monthly",
     };
   }

@@ -61,28 +61,33 @@ export class CursorDashboardClient {
   }
 
   async getFilteredUsageEvents(opts: {
-    startDate: number;
-    endDate: number;
+    startDate?: number;
+    endDate?: number;
     page?: number;
     pageSize?: number;
     teamId?: number;
   }): Promise<FilteredUsageEventsResponse> {
+    const body: Record<string, unknown> = {
+      page: opts.page ?? 1,
+      pageSize: opts.pageSize ?? 500,
+      teamId: opts.teamId ?? 0,
+    };
+    if (opts.startDate !== undefined) {
+      body.startDate = opts.startDate;
+    }
+    if (opts.endDate !== undefined) {
+      body.endDate = opts.endDate;
+    }
     return this.postJson<FilteredUsageEventsResponse>(
       "/api/dashboard/get-filtered-usage-events",
-      {
-        startDate: opts.startDate,
-        endDate: opts.endDate,
-        page: opts.page ?? 1,
-        pageSize: opts.pageSize ?? 500,
-        teamId: opts.teamId ?? 0,
-      }
+      body
     );
   }
 
   /** Fetch every page of filtered usage events for the range (cap pages for safety). */
   async getAllFilteredUsageEvents(opts: {
-    startDate: number;
-    endDate: number;
+    startDate?: number;
+    endDate?: number;
     pageSize?: number;
     teamId?: number;
     maxPages?: number;
@@ -121,6 +126,70 @@ export class CursorDashboardClient {
       usageEventsDisplay: all,
       totalUsageEventsCount: totalUsageEventsCount || all.length,
     };
+  }
+
+  /**
+   * Load usage events, retrying alternate date shapes when the primary window
+   * is empty (Cursor has shipped both ms and second epochs; unified billing
+   * sometimes omits rows until an unbounded query).
+   */
+  async getAllFilteredUsageEventsWithFallback(opts: {
+    startDate: number;
+    endDate: number;
+    pageSize?: number;
+    teamId?: number;
+    maxPages?: number;
+  }): Promise<{
+    response: FilteredUsageEventsResponse;
+    fetchStrategy:
+      | "primary"
+      | "primary-seconds"
+      | "wide-30d"
+      | "unbounded"
+      | "empty";
+  }> {
+    const base = {
+      pageSize: opts.pageSize,
+      teamId: opts.teamId,
+      maxPages: opts.maxPages,
+    };
+
+    const primary = await this.getAllFilteredUsageEvents({
+      ...base,
+      startDate: opts.startDate,
+      endDate: opts.endDate,
+    });
+    if ((primary.usageEventsDisplay?.length ?? 0) > 0) {
+      return { response: primary, fetchStrategy: "primary" };
+    }
+
+    if (opts.startDate > 1e12) {
+      const sec = await this.getAllFilteredUsageEvents({
+        ...base,
+        startDate: Math.floor(opts.startDate / 1000),
+        endDate: Math.floor(opts.endDate / 1000),
+      });
+      if ((sec.usageEventsDisplay?.length ?? 0) > 0) {
+        return { response: sec, fetchStrategy: "primary-seconds" };
+      }
+    }
+
+    const end = Date.now();
+    const wide = await this.getAllFilteredUsageEvents({
+      ...base,
+      startDate: end - 30 * 86400000,
+      endDate: end,
+    });
+    if ((wide.usageEventsDisplay?.length ?? 0) > 0) {
+      return { response: wide, fetchStrategy: "wide-30d" };
+    }
+
+    const unbounded = await this.getAllFilteredUsageEvents(base);
+    if ((unbounded.usageEventsDisplay?.length ?? 0) > 0) {
+      return { response: unbounded, fetchStrategy: "unbounded" };
+    }
+
+    return { response: primary, fetchStrategy: "empty" };
   }
 
   /**

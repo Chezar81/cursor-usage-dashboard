@@ -723,7 +723,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       <div class="panel">
         <div class="section-head">
           <h2>Top 5 models</h2>
-          <p class="section-sub" id="models-sub">Intent vs actual when they differ</p>
+          <p class="section-sub" id="models-sub">Routed models · Auto vs manual</p>
         </div>
         <div id="models"></div>
       </div>
@@ -1124,9 +1124,13 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             " pending"
         );
       }
+      const autoReqTotal = apiRows.reduce((s, m) => s + (m.autoRequests || 0), 0);
       if (apiRows.length) {
         subParts.push(fmtCents(totals.costCents) + " total");
-        subParts.push("intent vs actual when they differ");
+        subParts.push("by model that served the request");
+        if (autoReqTotal > 0) {
+          subParts.push(autoReqTotal + " Auto-routed req" + (autoReqTotal === 1 ? "" : "s"));
+        }
       } else {
         subParts.push("local labels first — matched when API publishes events");
       }
@@ -1144,22 +1148,27 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         '<div class="model-list">' +
         models
           .map((m, i) => {
-            const intent = m.modelIntent || m.model || "unknown";
-            const actual = m.model || m.modelIntent || "unknown";
-            const same = intent === actual;
-            const title = same
-              ? '<div class="model-name">' +
-                escapeHtml(intent) +
-                (m.localPending
-                  ? "<span class='pending-pill' title='Local model from AI tracking / transcripts; waiting for Cursor usage API'>Pending API</span>"
-                  : "") +
-                "</div>"
-              : '<div class="model-pair">' +
-                '<div class="model-line"><span class="model-label">Intent</span>' +
-                '<span class="model-value">' + escapeHtml(intent) + "</span></div>" +
-                '<div class="model-line"><span class="model-label">Actual</span>' +
-                '<span class="model-value">' + escapeHtml(actual) + "</span></div>" +
-                "</div>";
+            const routed = m.model || m.modelIntent || "unknown";
+            const autoReq = m.autoRequests || 0;
+            const manualReq = m.manualRequests || 0;
+            let routeMeta = "";
+            if (!m.localPending && (autoReq > 0 || manualReq > 0)) {
+              const bits = [];
+              if (autoReq > 0) {
+                bits.push("Auto " + autoReq + " req" + (autoReq === 1 ? "" : "s"));
+              }
+              if (manualReq > 0) {
+                bits.push("Manual " + manualReq + " req" + (manualReq === 1 ? "" : "s"));
+              }
+              routeMeta = bits.join(" · ");
+            }
+            const title =
+              '<div class="model-name">' +
+              escapeHtml(routed) +
+              (m.localPending
+                ? "<span class='pending-pill' title='Local model from AI tracking / transcripts; waiting for Cursor usage API'>Pending API</span>"
+                : "") +
+              "</div>";
 
             if (m.localPending) {
               const chats = m.pendingConversations || 0;
@@ -1190,6 +1199,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             return (
               '<div class="model-row">' +
               "<div>" + title +
+              (routeMeta
+                ? '<div class="model-meta">' + escapeHtml(routeMeta) + "</div>"
+                : "") +
               '<div class="model-meta">in ' + fmtTokens(m.inputTokens) +
               " · out " + fmtTokens(m.outputTokens) +
               " · cache " + fmtTokens(m.cacheReadTokens) +

@@ -156,6 +156,10 @@ export interface ModelBreakdown {
    * billed API usage.
    */
   tokensEstimated?: boolean;
+  /** Usage events where picker was Auto / router (when from API). */
+  autoRequests?: number;
+  /** Usage events with an explicit non-Auto model intent. */
+  manualRequests?: number;
 }
 
 export interface DailyPoint {
@@ -221,6 +225,13 @@ export interface TrendMeta {
   matchedConversations: number;
   /** True when plan usage suggests activity but API events lag (or only local pending). */
   eventsStale: boolean;
+  /** How filtered usage events were loaded when the primary window was empty. */
+  usageEventsFetchStrategy?:
+    | "primary"
+    | "primary-seconds"
+    | "wide-30d"
+    | "unbounded"
+    | "empty";
   note?: string;
 }
 
