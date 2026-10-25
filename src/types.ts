@@ -176,6 +176,34 @@ export interface DailyPoint {
   matchedConversations: number;
 }
 
+/**
+ * One agent chat’s usage on a single local calendar day.
+ * A chat that spans days appears once per day, with that day’s tokens and cost.
+ */
+export interface DaySession {
+  /** Local calendar day YYYY-MM-DD */
+  date: string;
+  conversationId: string;
+  /** First user message, shortened. */
+  title: string;
+  /** Project folder the chat belongs to, when known locally. */
+  workspace: string;
+  /** Model that served most of this day’s usage (by cost, then tokens). */
+  model: string;
+  /** Requested model when it differs from `model`. */
+  modelIntent?: string;
+  /** Distinct models on this chat this day. Above 1, the UI shows “+n”. */
+  modelCount?: number;
+  /** Usage events Cursor recorded for this chat on this day. */
+  requests: number;
+  tokens: number;
+  costCents: number;
+  /** True when this row is only a local transcript (API has no events yet). */
+  localPending?: boolean;
+  /** True when `tokens` is a transcript estimate (chars÷4), not billed usage. */
+  tokensEstimated?: boolean;
+}
+
 /** How Trend/models window was chosen. */
 export type TrendRangeKind = "weekly" | "monthly";
 
@@ -281,6 +309,8 @@ export interface DashboardData {
   plan: PlanView;
   models: ModelBreakdown[];
   daily: DailyPoint[];
+  /** Agent chats per day, for the Trend drill-down. */
+  sessions: DaySession[];
   trend?: TrendMeta;
   workspaces: WorkspaceStat[];
   contextUsage: ContextUsageView;

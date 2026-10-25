@@ -11,7 +11,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
   ].join("; ");
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-appearance="system">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
@@ -38,6 +38,41 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       --ease: cubic-bezier(0.22, 1, 0.36, 1);
     }
 
+    /* Light and Dark override Cursor. System (no extra rules) keeps the theme tokens above. */
+    /* Same base colors as Cursor Light, so this matches System while Cursor is light. */
+    html[data-appearance="light"] {
+      color-scheme: light;
+      --bg: #fcfcfc;
+      --fg: #141414;
+      --muted: #141414bd;
+      --accent: #2778c1;
+      --accent-fg: #fcfcfc;
+      --error: #be1744;
+      --chart: #2778c1;
+      --chart2: #cd4500;
+      --chart3: #00854c;
+      --chart4: #7565cc;
+      --warn: #a46700;
+    }
+    html[data-appearance="dark"] {
+      color-scheme: dark;
+      --bg: #1e1e1e;
+      --fg: #d8d8d8;
+      --muted: #9a9a9a;
+      --border: rgba(255, 255, 255, 0.12);
+      --border-strong: rgba(255, 255, 255, 0.22);
+      --surface: #252526;
+      --surface-2: #2d2d30;
+      --accent: #0e639c;
+      --accent-fg: #ffffff;
+      --error: #f48771;
+      --chart: #3d9aed;
+      --chart2: #d4a017;
+      --chart3: #3fae7c;
+      --chart4: #b07cc6;
+      --warn: #c9a227;
+    }
+
     * { box-sizing: border-box; }
 
     body {
@@ -52,6 +87,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         radial-gradient(900px 480px at 100% 0%, color-mix(in srgb, var(--chart3) 10%, transparent), transparent 50%),
         linear-gradient(180deg, color-mix(in srgb, var(--fg) 3%, var(--bg)) 0%, var(--bg) 42%);
       background-attachment: fixed;
+    }
+    html[data-appearance="light"] body,
+    html[data-appearance="dark"] body {
+      color: var(--fg);
+      background-color: var(--bg);
     }
 
     .shell {
@@ -96,8 +136,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     }
     .actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+      justify-content: flex-end;
     }
 
     button {
@@ -124,6 +166,23 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       background: var(--surface);
       border-color: color-mix(in srgb, var(--fg) 32%, transparent);
     }
+    button.icon-btn {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-2);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+    }
+    button.icon-btn:hover {
+      background: color-mix(in srgb, var(--fg) 10%, var(--bg));
+    }
+    button.icon-btn .theme-icon { display: none; }
+    button.icon-btn .theme-icon.is-on { display: block; }
 
     /* Banner */
     .banner {
@@ -534,6 +593,30 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         linear-gradient(180deg, color-mix(in srgb, var(--chart) 5%, transparent), transparent 55%);
     }
     canvas { width: 100%; height: 100%; display: block; }
+    #trend { cursor: pointer; }
+    .day-sessions { margin-top: 16px; }
+    .day-sessions .section-head { margin-bottom: 4px; }
+    .day-table-wrap { overflow-x: auto; }
+    .session-title {
+      display: block;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-sub {
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-intent {
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.3;
+    }
 
     /* Workspaces */
     table {
@@ -598,6 +681,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         <div class="meta" id="fetched-at">Loading…</div>
       </div>
       <div class="actions">
+        <button id="btn-appearance" class="icon-btn" type="button" title="Appearance: System (follows Cursor). Click for light." aria-label="Appearance: System (follows Cursor). Click for light.">
+          <svg class="theme-icon is-on" data-icon="system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8"></path><path d="M12 16v4"></path></svg>
+          <svg class="theme-icon" data-icon="light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+          <svg class="theme-icon" data-icon="dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 14.5A8.5 8.5 0 1 1 9.5 3 7 7 0 0 0 21 14.5z"></path></svg>
+        </button>
         <div class="seg" role="group" aria-label="Currency">
           <button type="button" id="cur-usd" data-currency="USD" class="active">$</button>
           <button type="button" id="cur-eur" data-currency="EUR">€</button>
@@ -663,11 +751,13 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             <button type="button" data-metric="spend">Spend</button>
           </div>
         </div>
-        <div class="chart-wrap"><canvas id="trend"></canvas></div>
+        <div class="chart-wrap"><canvas id="trend" aria-label="Daily usage. Click a day to list its chats."></canvas></div>
         <div class="trend-legend" id="trend-legend" hidden>
           <span><i class="trend-swatch" aria-hidden="true"></i> API tokens / spend</span>
           <span><i class="trend-swatch pending" aria-hidden="true"></i> Local estimate (pending API)</span>
         </div>
+        <p class="section-sub" id="trend-hint" style="margin-top:8px">Click a day to see its chats.</p>
+        <div id="day-sessions" class="day-sessions" hidden></div>
         <p class="section-sub" id="trend-note" style="margin-top:10px"></p>
       </div>
     </section>
@@ -690,7 +780,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     const vscode = acquireVsCodeApi();
     let data = null;
     let metric = "tokens";
-    let prefs = { currency: "USD", eurPerUsd: 0.92 };
+    let selectedDay = null;
+    let trendHits = [];
+    let prefs = { currency: "USD", eurPerUsd: 0.92, appearance: "system" };
     const RING_C = 2 * Math.PI * 54;
 
     document.getElementById("btn-refresh").addEventListener("click", () => {
@@ -720,6 +812,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         vscode.postMessage({ type: "setCurrency", currency });
       });
     });
+    document.getElementById("btn-appearance").addEventListener("click", () => {
+      prefs = { ...prefs, appearance: nextAppearance(prefs.appearance) };
+      applyAppearance(true);
+      vscode.postMessage({ type: "setAppearance", appearance: prefs.appearance });
+    });
 
     window.addEventListener("message", (event) => {
       const msg = event.data;
@@ -730,8 +827,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             typeof msg.prefs.eurPerUsd === "number" && msg.prefs.eurPerUsd > 0
               ? msg.prefs.eurPerUsd
               : 0.92,
+          appearance: normalizeAppearance(msg.prefs.appearance),
         };
         syncCurrencyToggle();
+        applyAppearance(false);
       }
       if (msg?.type === "data") {
         data = msg.payload;
@@ -745,6 +844,33 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       document.querySelectorAll("[data-currency]").forEach((b) => {
         b.classList.toggle("active", b.getAttribute("data-currency") === prefs.currency);
       });
+    }
+    const APPEARANCE_NEXT = { system: "light", light: "dark", dark: "system" };
+    const APPEARANCE_LABEL = { system: "System", light: "Light", dark: "Dark" };
+    function normalizeAppearance(value) {
+      return value === "light" || value === "dark" ? value : "system";
+    }
+    function nextAppearance(value) {
+      return APPEARANCE_NEXT[normalizeAppearance(value)] || "system";
+    }
+    function appearanceTitle(mode) {
+      const current = mode === "system" ? "System (follows Cursor)" : APPEARANCE_LABEL[mode];
+      return "Appearance: " + current + ". Click for " + APPEARANCE_LABEL[nextAppearance(mode)].toLowerCase() + ".";
+    }
+    function syncAppearanceToggle() {
+      const mode = normalizeAppearance(prefs.appearance);
+      document.querySelectorAll(".theme-icon").forEach((el) => {
+        el.classList.toggle("is-on", el.getAttribute("data-icon") === mode);
+      });
+      const btn = document.getElementById("btn-appearance");
+      const label = appearanceTitle(mode);
+      btn.title = label;
+      btn.setAttribute("aria-label", label);
+    }
+    function applyAppearance(redraw) {
+      document.documentElement.setAttribute("data-appearance", prefs.appearance);
+      syncAppearanceToggle();
+      if (redraw && data) drawTrend();
     }
 
     function fmtTokens(n) {
@@ -882,6 +1008,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         renderModels();
         renderContextUsage();
         drawTrend();
+        renderDaySessions();
         renderWorkspaces();
       } catch (err) {
         const banner = document.getElementById("banner");
@@ -1195,7 +1322,14 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       const w = rect.width;
       const h = rect.height;
       ctx.clearRect(0, 0, w, h);
-      if (!daily.length) return;
+      if (!daily.length) {
+        trendHits = [];
+        selectedDay = null;
+        return;
+      }
+      if (selectedDay && !daily.some((d) => d.date === selectedDay)) {
+        selectedDay = null;
+      }
 
       const apiValues = daily.map((d) =>
         metric === "spend" ? toDisplayAmount(d.costCents / 100) : d.tokens
@@ -1263,6 +1397,21 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       };
       const yApi = (v) => pad.t + plotH - (v / apiMax) * plotH;
       const yLocal = (v) => pad.t + plotH - (v / localMax) * plotH;
+      trendHits = daily.map((d, i) => ({ date: d.date, x: xAt(i) }));
+
+      const selectedIndex = selectedDay
+        ? daily.findIndex((d) => d.date === selectedDay)
+        : -1;
+      if (selectedIndex >= 0) {
+        const x = xAt(selectedIndex);
+        const prevX = selectedIndex > 0 ? xAt(selectedIndex - 1) : x - 36;
+        const nextX = selectedIndex < n - 1 ? xAt(selectedIndex + 1) : x + 36;
+        const half = Math.max(10, Math.min(Math.abs(x - prevX), Math.abs(nextX - x)) / 2);
+        ctx.fillStyle = cssVar("--accent", apiColor);
+        ctx.globalAlpha = 0.14;
+        ctx.fillRect(x - half, pad.t, half * 2, plotH);
+        ctx.globalAlpha = 1;
+      }
 
       function drawSeries(values, yFn, color, opts) {
         const pts = values.map((v, i) => ({ x: xAt(i), y: yFn(v), v: v }));
@@ -1364,12 +1513,126 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       ctx.textAlign = "center";
       ctx.textBaseline = "alphabetic";
       const labelEvery = n <= 8;
+      const labelFont =
+        "11px " + (cssVar("--vscode-font-family", "sans-serif") || "sans-serif");
       daily.forEach((d, i) => {
-        if (!labelEvery && i !== 0 && i !== n - 1 && i !== Math.floor(n / 2)) {
+        const selected = d.date === selectedDay;
+        if (!selected && !labelEvery && i !== 0 && i !== n - 1 && i !== Math.floor(n / 2)) {
           return;
         }
+        ctx.fillStyle = selected ? cssVar("--accent", apiColor) : muted;
+        ctx.font = selected ? "600 " + labelFont : labelFont;
         ctx.fillText(fmtTrendDay(d.date), xAt(i), h - 10);
       });
+      ctx.font = font;
+    }
+
+    function fmtTrendDayLong(isoDay) {
+      if (!isoDay || typeof isoDay !== "string") return "—";
+      const parts = isoDay.split("-").map((n) => Number(n));
+      if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return isoDay;
+      const dt = new Date(parts[0], parts[1] - 1, parts[2]);
+      if (!Number.isFinite(dt.getTime())) return isoDay;
+      return dt.toLocaleDateString(undefined, {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+      });
+    }
+
+    function dayAtClientX(clientX) {
+      const canvas = document.getElementById("trend");
+      if (!canvas || !trendHits.length) return null;
+      const x = clientX - canvas.getBoundingClientRect().left;
+      let best = null;
+      let bestDist = Infinity;
+      for (const hit of trendHits) {
+        const dist = Math.abs(hit.x - x);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = hit;
+        }
+      }
+      if (!best) return null;
+      const gap = trendHits.length < 2
+        ? 48
+        : Math.abs(trendHits[1].x - trendHits[0].x);
+      const limit = Math.max(14, gap / 2);
+      return bestDist <= limit + 0.5 ? best.date : null;
+    }
+
+    function renderDaySessions() {
+      const el = document.getElementById("day-sessions");
+      if (!el) return;
+      const daily = (data && data.daily) || [];
+      const point = selectedDay ? daily.find((d) => d.date === selectedDay) : null;
+      if (!point) {
+        el.hidden = true;
+        el.innerHTML = "";
+        return;
+      }
+      const rows = ((data && data.sessions) || [])
+        .filter((s) => s.date === selectedDay)
+        .slice()
+        .sort((a, b) =>
+          (b.costCents || 0) - (a.costCents || 0) ||
+          (b.tokens || 0) - (a.tokens || 0) ||
+          String(a.title || "").localeCompare(String(b.title || ""))
+        );
+      const bits = [rows.length + (rows.length === 1 ? " chat" : " chats")];
+      if (point.tokens > 0) bits.push(fmtTokens(point.tokens));
+      if (point.localEstimatedTokens > 0) {
+        bits.push(fmtEstTokens(point.localEstimatedTokens) + " pending");
+      }
+      if (point.costCents > 0) bits.push(fmtCents(point.costCents));
+      bits.push("usage on this day");
+
+      let body;
+      if (!rows.length) {
+        body = '<p class="empty">No chats recorded for this day.</p>';
+      } else {
+        body =
+          '<div class="day-table-wrap"><table><thead><tr>' +
+          "<th>Chat</th><th>Project</th><th>Model</th>" +
+          "<th class='num'>Requests</th><th class='num'>Tokens</th><th class='num'>Cost</th>" +
+          "</tr></thead><tbody>" +
+          rows.map((s) => {
+            const title = s.title || "Untitled chat";
+            const intent = s.modelIntent && s.modelIntent !== s.model
+              ? '<div class="session-intent">Intent ' + escapeHtml(s.modelIntent) + "</div>"
+              : "";
+            const extra = s.modelCount > 1 ? " +" + (s.modelCount - 1) : "";
+            const tokens = s.tokensEstimated ? fmtEstTokens(s.tokens) : fmtTokens(s.tokens);
+            const cost = s.localPending && !(s.costCents > 0) ? "—" : fmtCents(s.costCents);
+            const requests = s.localPending ? "—" : String(s.requests || 0);
+            return (
+              "<tr><td><span class='session-title' title='" + escapeHtml(title) + "'>" +
+              escapeHtml(title) +
+              "</span>" +
+              (s.localPending
+                ? "<span class='pending-pill' title='Local chat seen; waiting for Cursor usage API. Token figure is a rough transcript estimate (chars÷4).'>Pending API</span>"
+                : "") +
+              "</td><td><span class='session-sub' title='" + escapeHtml(s.workspace || "") + "'>" +
+              escapeHtml(s.workspace || "—") +
+              "</span></td><td><span class='session-sub' title='" +
+              escapeHtml((s.model || "") + (extra ? " and " + (s.modelCount - 1) + " more" : "")) +
+              "'>" + escapeHtml(s.model || "—") + extra + "</span>" + intent +
+              "</td><td class='num'>" + requests +
+              "</td><td class='num'>" + tokens +
+              "</td><td class='num'>" + cost +
+              "</td></tr>"
+            );
+          }).join("") +
+          "</tbody></table></div>" +
+          '<p class="section-sub" style="margin-top:8px">A chat that continues across days is listed on each day, with that day’s usage.</p>';
+      }
+
+      el.hidden = false;
+      el.innerHTML =
+        '<div class="section-head"><h2>Sessions · ' + escapeHtml(fmtTrendDayLong(selectedDay)) +
+        '</h2><button type="button" class="linkish" data-close-day>Close</button></div>' +
+        '<p class="section-sub" style="margin:0 0 10px">' + escapeHtml(bits.join(" · ")) + "</p>" +
+        body;
     }
 
     function renderWorkspaces() {
@@ -1406,6 +1669,28 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           .join("") +
         "</tbody></table>";
     }
+
+    document.getElementById("trend").addEventListener("click", (event) => {
+      const day = dayAtClientX(event.clientX);
+      if (!day) return;
+      selectedDay = selectedDay === day ? null : day;
+      drawTrend();
+      renderDaySessions();
+    });
+    document.getElementById("trend").addEventListener("mousemove", (event) => {
+      const canvas = document.getElementById("trend");
+      const day = dayAtClientX(event.clientX);
+      canvas.title = day ? "Show chats for " + fmtTrendDay(day) : "";
+    });
+    document.getElementById("day-sessions").addEventListener("click", (event) => {
+      const closer = event.target && event.target.closest
+        ? event.target.closest("[data-close-day]")
+        : null;
+      if (!closer) return;
+      selectedDay = null;
+      drawTrend();
+      renderDaySessions();
+    });
 
     let resizeTimer;
     window.addEventListener("resize", () => {

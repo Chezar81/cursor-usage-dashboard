@@ -11,6 +11,7 @@ import type {
   ContextUsageView,
   DailyPoint,
   DashboardData,
+  DaySession,
   FilteredUsageEvent,
   FilteredUsageEventsResponse,
   ModelBreakdown,
@@ -550,6 +551,179 @@ export function dailyFromEvents(
   return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
+interface SessionModelAcc {
+  modelIntent: string;
+  model: string;
+  tokens: number;
+  costCents: number;
+}
+
+interface SessionBucket {
+  date: string;
+  conversationId: string;
+  title: string;
+  workspace: string;
+  requests: number;
+  tokens: number;
+  costCents: number;
+  localPending: boolean;
+  tokensEstimated: boolean;
+  models: Map<string, SessionModelAcc>;
+}
+
+/**
+ * One row per agent chat per local day.
+ * API events supply billed tokens and cost. Chats the API has not listed yet
+ * appear on their last-active day with a transcript estimate, same rule as Trend.
+ */
+export function sessionsFromActivity(input: {
+  events: FilteredUsageEvent[];
+  localConversations: LocalConversationActivity[];
+  localModels: LocalModelActivity[];
+  rangeStartMs: number;
+  rangeEndMs: number;
+}): DaySession[] {
+  const meta = new Map<
+    string,
+    { title: string; workspace: string }
+  >();
+  for (const local of input.localConversations) {
+    meta.set(local.conversationId, {
+      title: (local.title || "").trim(),
+      workspace: (local.displayName || "").trim(),
+    });
+  }
+  const modelByConversation = new Map<string, string>();
+  for (const local of input.localModels) {
+    modelByConversation.set(
+      local.conversationId,
+      formatLocalModelLabel(local.model)
+    );
+  }
+
+  const buckets = new Map<string, SessionBucket>();
+  const ensure = (date: string, conversationId: string): SessionBucket => {
+    const key = `${date}\0${conversationId}`;
+    const existing = buckets.get(key);
+    if (existing) {
+      return existing;
+    }
+    const info = conversationId ? meta.get(conversationId) : undefined;
+    const bucket: SessionBucket = {
+      date,
+      conversationId,
+      title: info?.title || (conversationId ? "Untitled chat" : "Other requests"),
+      workspace: info?.workspace || "—",
+      requests: 0,
+      tokens: 0,
+      costCents: 0,
+      localPending: false,
+      tokensEstimated: false,
+      models: new Map(),
+    };
+    buckets.set(key, bucket);
+    return bucket;
+  };
+
+  const matchedIds = apiConversationIds(input.events);
+
+  for (const ev of input.events) {
+    const ms = asDateMs(ev.timestamp);
+    if (ms === undefined) {
+      continue;
+    }
+    const bucket = ensure(dayKeyLocal(ms), extractConversationId(ev) || "");
+    const tokens = eventTokens(ev);
+    const cost = eventCostCents(ev);
+    bucket.requests += 1;
+    bucket.tokens += tokens;
+    bucket.costCents += cost;
+    const names = resolveModelNames(ev);
+    const mkey = modelRowKey(names.modelIntent, names.model);
+    let row = bucket.models.get(mkey);
+    if (!row) {
+      row = { modelIntent: names.modelIntent, model: names.model, tokens: 0, costCents: 0 };
+      bucket.models.set(mkey, row);
+    }
+    row.tokens += tokens;
+    row.costCents += cost;
+  }
+
+  for (const local of input.localConversations) {
+    if (matchedIds.has(local.conversationId)) {
+      continue;
+    }
+    if (
+      local.lastActiveMs < input.rangeStartMs ||
+      local.lastActiveMs > input.rangeEndMs
+    ) {
+      continue;
+    }
+    const bucket = ensure(local.dayKey, local.conversationId);
+    bucket.localPending = true;
+    bucket.tokens = Math.max(0, local.estimatedTokens || 0);
+    bucket.tokensEstimated = bucket.tokens > 0;
+    const label = modelByConversation.get(local.conversationId) ?? "Unknown";
+    bucket.models.set(label, {
+      modelIntent: label,
+      model: label,
+      tokens: bucket.tokens,
+      costCents: 0,
+    });
+  }
+
+  const sessions: DaySession[] = [];
+  for (const bucket of buckets.values()) {
+    if (bucket.requests === 0 && !bucket.localPending) {
+      continue;
+    }
+    const dominant = dominantSessionModel(bucket.models);
+    const model = dominant?.model || (bucket.localPending ? "Unknown" : "unknown");
+    const modelIntent = dominant?.modelIntent;
+    const modelCount = bucket.models.size;
+    sessions.push({
+      date: bucket.date,
+      conversationId: bucket.conversationId,
+      title: bucket.title,
+      workspace: bucket.workspace,
+      model,
+      modelIntent:
+        modelIntent && modelIntent !== model ? modelIntent : undefined,
+      modelCount: modelCount > 1 ? modelCount : undefined,
+      requests: bucket.requests,
+      tokens: bucket.tokens,
+      costCents: bucket.costCents,
+      localPending: bucket.localPending || undefined,
+      tokensEstimated: bucket.tokensEstimated || undefined,
+    });
+  }
+
+  sessions.sort(
+    (a, b) =>
+      a.date.localeCompare(b.date) ||
+      b.costCents - a.costCents ||
+      b.tokens - a.tokens ||
+      a.title.localeCompare(b.title)
+  );
+  return sessions;
+}
+
+function dominantSessionModel(
+  models: Map<string, SessionModelAcc>
+): SessionModelAcc | undefined {
+  let best: SessionModelAcc | undefined;
+  for (const row of models.values()) {
+    if (
+      !best ||
+      row.costCents > best.costCents ||
+      (row.costCents === best.costCents && row.tokens > best.tokens)
+    ) {
+      best = row;
+    }
+  }
+  return best;
+}
+
 export function buildTrendMeta(input: {
   events: FilteredUsageEvent[];
   localConversations: LocalConversationActivity[];
@@ -755,6 +929,13 @@ export function buildDashboardData(input: {
     input.rangeEndMs,
     localConversations
   );
+  const sessions = sessionsFromActivity({
+    events,
+    localConversations,
+    localModels,
+    rangeStartMs: input.rangeStartMs,
+    rangeEndMs: input.rangeEndMs,
+  });
   const trend = buildTrendMeta({
     events,
     localConversations,
@@ -770,6 +951,7 @@ export function buildDashboardData(input: {
     plan,
     models,
     daily,
+    sessions,
     trend,
     workspaces: input.workspaces,
     contextUsage: input.contextUsage,

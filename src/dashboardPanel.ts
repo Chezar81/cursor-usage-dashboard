@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import type { DashboardAppearance } from "./appearance";
+import { getAppearance } from "./appearance";
 import type { CurrencyPrefs, DisplayCurrency } from "./currency";
 import { getCurrencyPrefs } from "./currency";
 import type { DashboardData } from "./types";
@@ -17,6 +19,7 @@ export class DashboardPanel {
     private readonly onRefresh: () => void,
     private readonly onSetToken: () => void,
     private readonly onSetCurrency: (currency: DisplayCurrency) => void,
+    private readonly onSetAppearance: (appearance: DashboardAppearance) => void,
     initial?: DashboardData
   ) {
     this.panel = panel;
@@ -39,6 +42,12 @@ export class DashboardPanel {
         } else if (msg?.type === "setCurrency") {
           const c = msg.currency === "EUR" ? "EUR" : "USD";
           this.onSetCurrency(c);
+        } else if (msg?.type === "setAppearance") {
+          const appearance =
+            msg.appearance === "light" || msg.appearance === "dark"
+              ? msg.appearance
+              : "system";
+          this.onSetAppearance(appearance);
         } else if (msg?.type === "viewContextReport") {
           void vscode.env.openExternal(
             vscode.Uri.parse("https://cursor.com/docs/agent/prompting")
@@ -55,6 +64,7 @@ export class DashboardPanel {
     onRefresh: () => void,
     onSetToken: () => void,
     onSetCurrency: (currency: DisplayCurrency) => void,
+    onSetAppearance: (appearance: DashboardAppearance) => void,
     initial?: DashboardData
   ): DashboardPanel {
     const column =
@@ -84,6 +94,7 @@ export class DashboardPanel {
       onRefresh,
       onSetToken,
       onSetCurrency,
+      onSetAppearance,
       initial
     );
     return DashboardPanel.current;
@@ -114,8 +125,8 @@ export class DashboardPanel {
     // Webview still loading — `ready` handler will flush `latest`.
   }
 
-  private prefs(): CurrencyPrefs {
-    return getCurrencyPrefs();
+  private prefs(): CurrencyPrefs & { appearance: DashboardAppearance } {
+    return { ...getCurrencyPrefs(), appearance: getAppearance() };
   }
 
   private post(data: DashboardData): void {

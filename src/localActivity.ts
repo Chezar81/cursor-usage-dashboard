@@ -27,6 +27,8 @@ export interface LocalConversationActivity {
    * Not billed usage — undercounts cache/tools/system context.
    */
   estimatedTokens: number;
+  /** First user message, one line. Empty when the transcript has no user text. */
+  title: string;
 }
 
 export interface LocalActivityScan {
@@ -102,6 +104,7 @@ export function scanLocalConversationActivity(opts?: {
         lastActiveMs,
         dayKey: dayKeyLocal(lastActiveMs),
         estimatedTokens: estimateTranscriptTokens(transcriptFile),
+        title: transcriptTitle(transcriptFile),
       });
     }
   }
@@ -175,6 +178,122 @@ export function estimateTranscriptTokens(
   } catch {
     return 0;
   }
+}
+
+/** How much of a transcript to scan for the opening user message. */
+const TITLE_READ_BYTES = 256 * 1024;
+const MAX_TITLE_CHARS = 120;
+
+/**
+ * First user message as a single-line title.
+ * Empty when the file is missing or has no user text.
+ */
+export function transcriptTitle(transcriptFile: string | undefined): string {
+  if (!transcriptFile) {
+    return "";
+  }
+  try {
+    const raw = readTranscriptHead(transcriptFile, TITLE_READ_BYTES);
+    return titleFromTranscriptJsonl(raw);
+  } catch {
+    return "";
+  }
+}
+
+/** Pull a short title from the first user turn in a JSONL transcript. */
+export function titleFromTranscriptJsonl(raw: string): string {
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const text = userTextFromRecord(parsed);
+    if (!text) {
+      continue;
+    }
+    const title = titleFromUserText(text);
+    if (title) {
+      return title;
+    }
+  }
+  return "";
+}
+
+export function titleFromUserText(text: string): string {
+  const tagged = text.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
+  let body = tagged ? tagged[1] : text;
+  body = body.replace(/<[^>\n]+>/g, " ");
+  body = body.replace(/\s+/g, " ").trim();
+  if (!body) {
+    return "";
+  }
+  if (body.length <= MAX_TITLE_CHARS) {
+    return body;
+  }
+  return body.slice(0, MAX_TITLE_CHARS - 1).trimEnd() + "…";
+}
+
+function readTranscriptHead(file: string, maxBytes: number): string {
+  const fd = fs.openSync(file, "r");
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size <= 0) {
+      return "";
+    }
+    const toRead = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(toRead);
+    const n = fs.readSync(fd, buf, 0, toRead, 0);
+    let text = buf.toString("utf8", 0, n);
+    if (n < st.size) {
+      const cut = text.lastIndexOf("\n");
+      if (cut > 0) {
+        text = text.slice(0, cut);
+      }
+    }
+    return text;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function userTextFromRecord(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.role !== "user") {
+    return undefined;
+  }
+  const text = textFromContent(obj.message ?? obj);
+  return text || undefined;
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => textFromContent(part))
+      .filter((part) => part.length > 0)
+      .join("\n");
+  }
+  if (content && typeof content === "object") {
+    const obj = content as Record<string, unknown>;
+    if (typeof obj.text === "string") {
+      return obj.text;
+    }
+    if ("content" in obj) {
+      return textFromContent(obj.content);
+    }
+  }
+  return "";
 }
 
 export function estimateTokensFromJsonl(raw: string): number {

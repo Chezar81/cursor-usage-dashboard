@@ -43,6 +43,21 @@
           "maximum": 120,
           "description": "Auto-refresh interval in minutes for the status bar and open dashboard (while Cursor is focused). Default: 2."
         },
+        "cursorUsage.appearance": {
+          "type": "string",
+          "enum": [
+            "system",
+            "light",
+            "dark"
+          ],
+          "enumDescriptions": [
+            "Follow Cursor's color theme.",
+            "Always use the light dashboard.",
+            "Always use the dark dashboard."
+          ],
+          "default": "system",
+          "description": "Dashboard appearance. System follows Cursor's color theme. Light and Dark override it."
+        },
         "cursorUsage.currency": {
           "type": "string",
           "enum": [

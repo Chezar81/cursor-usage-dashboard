@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { setAppearance, type DashboardAppearance } from "./appearance";
 import { asDateMs, buildDashboardData, resolveCycleRange } from "./aggregator";
 import {
   formatMoneyFromUsdCents,
@@ -85,10 +86,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
+    vscode.window.onDidChangeActiveColorTheme(() => {
+      DashboardPanel.current?.refreshPrefs();
+    })
+  );
+
+  context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (
         e.affectsConfiguration("cursorUsage.currency") ||
-        e.affectsConfiguration("cursorUsage.eurPerUsd")
+        e.affectsConfiguration("cursorUsage.eurPerUsd") ||
+        e.affectsConfiguration("cursorUsage.appearance")
       ) {
         if (lastData) {
           updateStatusBar(lastData);
@@ -122,6 +130,9 @@ function openDashboard(context: vscode.ExtensionContext): void {
     },
     (currency: DisplayCurrency) => {
       void setDisplayCurrency(currency);
+    },
+    (appearance: DashboardAppearance) => {
+      void setAppearance(appearance);
     },
     lastData
   );
@@ -434,6 +445,7 @@ function emptyData(error: string, authError: boolean): DashboardData {
     },
     models: [],
     daily: [],
+    sessions: [],
     trend: {
       rangeKind: "monthly",
       pendingConversations: 0,

@@ -5,7 +5,7 @@ Personal Cursor usage dashboard (webview + status bar) for your own account:
 - Current plan / cycle usage (included pool %, prepaid credits from grok.com billing, reset date)
 - Model breakdown (tokens + cost)
 - **Estimated** context-window breakdown (rules, skills, MCP, conversation, …) from local Cursor/project files
-- Daily trend charts (tokens or spend), aligned with the weekly included window when that drives the plan ring
+- Daily trend charts (tokens or spend), aligned with the weekly included window when that drives the plan ring. Click a day to list the agent chats from that day — title, project, model, and that day’s tokens and cost
 - **Local-first Trend / Models / workspaces**: agent transcripts and local AI-tracking model labels show up immediately as “pending API” with a rough transcript token estimate (`chars÷4`, prefixed `~`); when Cursor’s usage events include the same `conversationId`, billed token/cost figures replace the provisional rows
 - **Estimated** per-workspace usage from local chats + open-folder tracking
 
@@ -48,6 +48,7 @@ Then **Developer: Reload Window**, click the **Usage** status bar item, and refr
 ## Settings
 
 - `cursorUsage.refreshIntervalMinutes` — auto-refresh status bar + open dashboard while Cursor is focused (default `2`, min `1`).
+- `cursorUsage.appearance` — `system` (follow Cursor's theme), `light`, or `dark`. The header icon cycles them: monitor, sun, moon.
 - `cursorUsage.currency` — `USD` or `EUR` (also switchable from the dashboard header).
 - `cursorUsage.eurPerUsd` — EUR per 1 USD when showing Euro (default `0.92`). Cursor amounts are USD; this rate is for display only.
 
