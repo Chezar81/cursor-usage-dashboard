@@ -722,7 +722,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     <section>
       <div class="panel">
         <div class="section-head">
-          <h2>Models</h2>
+          <h2>Top 5 models</h2>
           <p class="section-sub" id="models-sub">Intent vs actual when they differ</p>
         </div>
         <div id="models"></div>
@@ -1095,23 +1095,25 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
     function renderModels() {
       const el = document.getElementById("models");
-      const models = data.models || [];
+      const allModels = data.models || [];
+      const models = allModels.slice(0, 5);
       const totals = data.totals || {};
       const apiRows = models.filter((m) => !m.localPending);
       const pendingRows = models.filter((m) => m.localPending);
-      const pendingChats = pendingRows.reduce(
-        (s, m) => s + (m.pendingConversations || 0),
-        0
-      );
+      const pendingChats = allModels
+        .filter((m) => m.localPending)
+        .reduce((s, m) => s + (m.pendingConversations || 0), 0);
 
-      if (!models.length) {
+      if (!allModels.length) {
         document.getElementById("models-sub").textContent = "";
         el.innerHTML = '<p class="empty">No model usage in this period yet.</p>';
         return;
       }
 
       const subParts = [];
-      if (apiRows.length) {
+      if (allModels.length > models.length) {
+        subParts.push(allModels.length + " in this period");
+      } else if (apiRows.length) {
         subParts.push(apiRows.length + " API");
       }
       if (pendingChats > 0) {

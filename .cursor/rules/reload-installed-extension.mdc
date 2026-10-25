@@ -1,0 +1,19 @@
+---
+description: Rebuild and install the dashboard extension so Cursor reloads it
+alwaysApply: true
+---
+
+# Install extension changes
+
+The running dashboard is the installed extension at `~/.cursor/extensions/local.cursor-usage-dashboard-*/dist/extension.js`, not the TypeScript source. A window reload of stale code does nothing.
+
+After changing extension behavior, install it before ending the turn. Node is at `~/.local/node/bin` and is often missing from `PATH`. The install writes outside the workspace, so the shell needs unrestricted permissions.
+
+```bash
+export PATH="$HOME/.local/node/bin:$PATH"
+node esbuild.js --production && node scripts/install-local.js
+```
+
+Replacing that bundle makes the running extension reload the window. Do not ask Christoph to reload. Tell him the window will refresh on its own.
+
+The reload watcher starts only after a build that contains it is already running. If that watcher is not in the running build yet, say that this install still needs one manual reload and that later installs refresh the window themselves.

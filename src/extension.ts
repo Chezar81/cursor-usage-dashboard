@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { setAppearance, type DashboardAppearance } from "./appearance";
 import { asDateMs, buildDashboardData, resolveCycleRange } from "./aggregator";
+import { watchBundleReload } from "./bundleReload";
 import {
   formatMoneyFromUsdCents,
   getCurrencyPrefs,
@@ -33,6 +34,7 @@ let lastData: DashboardData | undefined;
 let refreshing = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  watchBundleReload(context);
   store = new LocalStore(context.globalStorageUri);
   tracker = new WorkspaceUsageTracker(store);
   client = new CursorDashboardClient(() => resolveSessionToken(context));

@@ -80,6 +80,7 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
+    "install-local": "node esbuild.js --production && node scripts/install-local.js",
     "watch": "node esbuild.js --watch",
     "compile": "npm run build",
     "package": "vsce package --no-dependencies"
