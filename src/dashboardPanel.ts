@@ -20,6 +20,7 @@ export class DashboardPanel {
     private readonly onSetToken: () => void,
     private readonly onSetCurrency: (currency: DisplayCurrency) => void,
     private readonly onSetAppearance: (appearance: DashboardAppearance) => void,
+    private readonly onDisposePanel: (() => void) | undefined,
     initial?: DashboardData
   ) {
     this.panel = panel;
@@ -65,7 +66,8 @@ export class DashboardPanel {
     onSetToken: () => void,
     onSetCurrency: (currency: DisplayCurrency) => void,
     onSetAppearance: (appearance: DashboardAppearance) => void,
-    initial?: DashboardData
+    initial?: DashboardData,
+    onDisposePanel?: () => void
   ): DashboardPanel {
     const column =
       vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
@@ -95,14 +97,37 @@ export class DashboardPanel {
       onSetToken,
       onSetCurrency,
       onSetAppearance,
+      onDisposePanel,
       initial
     );
     return DashboardPanel.current;
   }
 
+  /** True while the webview tab is the visible editor group content. */
+  isVisible(): boolean {
+    return this.panel.visible;
+  }
+
   update(data: DashboardData): void {
     this.latest = data;
     this.pushLatest();
+  }
+
+  /**
+   * Patch only the Context Usage box (local poll; no full dashboard re-render).
+   */
+  updateContextUsage(contextUsage: DashboardData["contextUsage"]): void {
+    if (!this.latest) {
+      return;
+    }
+    this.latest = { ...this.latest, contextUsage };
+    if (!this.webviewReady) {
+      return;
+    }
+    void this.panel.webview.postMessage({
+      type: "contextUsage",
+      payload: contextUsage,
+    });
   }
 
   /** Re-push prefs (and latest data) after currency setting changes. */
@@ -146,6 +171,7 @@ export class DashboardPanel {
 
   dispose(): void {
     DashboardPanel.current = undefined;
+    this.onDisposePanel?.();
     this.panel.dispose();
     while (this.disposables.length) {
       this.disposables.pop()?.dispose();

@@ -19,24 +19,34 @@ import {
   TOKEN_SECRET_KEY,
 } from "./cursorClient";
 import {
+  contextUsageEqual,
   emptyContextUsage,
   estimateContextUsage,
 } from "./contextEstimator";
 import { DashboardPanel } from "./dashboardPanel";
 import { scanLocalConversationActivity } from "./localActivity";
-import { scanLocalModelActivity } from "./localModelActivity";
+import {
+  mergeLocalModelActivity,
+  scanComposerModelActivity,
+  scanLocalModelActivity,
+} from "./localModelActivity";
 import { resolveIdeSessionCookie } from "./localAuth";
 import { LocalStore } from "./storage";
 import type { DashboardData } from "./types";
 import { WorkspaceUsageTracker } from "./workspaceTracker";
+
+/** Local-only Context Usage poll while the dashboard webview is open. */
+const CONTEXT_POLL_MS = 5_000;
 
 let statusBar: vscode.StatusBarItem;
 let client: CursorDashboardClient;
 let store: LocalStore;
 let tracker: WorkspaceUsageTracker;
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let contextPollTimer: ReturnType<typeof setInterval> | undefined;
 let lastData: DashboardData | undefined;
 let refreshing = false;
+let contextRefreshing = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   watchBundleReload(context);
@@ -88,6 +98,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void tracker.onWindowFocus();
         scheduleAutoRefresh(context);
         void refresh(context, { silent: true });
+        if (DashboardPanel.current) {
+          void refreshContextUsageOnly();
+        }
       }
     })
   );
@@ -124,6 +137,7 @@ export function deactivate(): void {
   if (refreshTimer) {
     clearInterval(refreshTimer);
   }
+  stopContextPoll();
 }
 
 function openDashboard(context: vscode.ExtensionContext): void {
@@ -141,10 +155,60 @@ function openDashboard(context: vscode.ExtensionContext): void {
     (appearance: DashboardAppearance) => {
       void setAppearance(appearance);
     },
-    lastData
+    lastData,
+    () => stopContextPoll()
   );
+  scheduleContextPoll();
   // Always refresh: cached data is seeded into the panel for instant paint.
   void refresh(context, { silent: !!lastData });
+}
+
+function scheduleContextPoll(): void {
+  if (contextPollTimer) {
+    return;
+  }
+  void refreshContextUsageOnly();
+  contextPollTimer = setInterval(() => {
+    void refreshContextUsageOnly();
+  }, CONTEXT_POLL_MS);
+}
+
+function stopContextPoll(): void {
+  if (contextPollTimer) {
+    clearInterval(contextPollTimer);
+    contextPollTimer = undefined;
+  }
+}
+
+/**
+ * Re-read Cursor's local composer context tray and patch the webview.
+ * No cursor.com API traffic; skipped when a full refresh is running or the
+ * dashboard tab is hidden / window unfocused.
+ */
+async function refreshContextUsageOnly(): Promise<void> {
+  if (refreshing || contextRefreshing) {
+    return;
+  }
+  const panel = DashboardPanel.current;
+  if (!panel?.isVisible() || !vscode.window.state.focused) {
+    return;
+  }
+  contextRefreshing = true;
+  try {
+    const contextUsage = await estimateContextUsage(
+      vscode.workspace.workspaceFolders
+    );
+    if (!lastData) {
+      return;
+    }
+    if (contextUsageEqual(lastData.contextUsage, contextUsage)) {
+      return;
+    }
+    lastData = { ...lastData, contextUsage };
+    panel.updateContextUsage(contextUsage);
+  } finally {
+    contextRefreshing = false;
+  }
 }
 
 /**
@@ -258,13 +322,28 @@ async function refresh(
       return;
     }
 
-    const [me, summary, period, sand, prepaid] = await Promise.all([
-      client.getAuthMe(),
-      client.getUsageSummary(),
-      client.getCurrentPeriodUsage(),
-      client.getSandUsageStatus(),
-      client.getUserPrepaidBilling(),
-    ]);
+    // One flaky endpoint must not blank the whole dashboard; auth still fails fast.
+    const [meR, summaryR, periodR, sandR, prepaidR, analyticsR] =
+      await Promise.allSettled([
+        client.getAuthMe(),
+        client.getUsageSummary(),
+        client.getCurrentPeriodUsage(),
+        client.getSandUsageStatus(),
+        client.getUserPrepaidBilling(),
+        client.getUserAnalytics(),
+      ]);
+    for (const r of [meR, summaryR, periodR, sandR, prepaidR, analyticsR]) {
+      if (r.status === "rejected" && r.reason instanceof CursorAuthError) {
+        throw r.reason;
+      }
+    }
+    const me = meR.status === "fulfilled" ? meR.value : undefined;
+    const summary = summaryR.status === "fulfilled" ? summaryR.value : undefined;
+    const period = periodR.status === "fulfilled" ? periodR.value : null;
+    const sand = sandR.status === "fulfilled" ? sandR.value : null;
+    const prepaid = prepaidR.status === "fulfilled" ? prepaidR.value : null;
+    const analytics =
+      analyticsR.status === "fulfilled" ? analyticsR.value : null;
     const { startMs, endMs, rangeKind } = resolveCycleRange(
       summary,
       period,
@@ -275,10 +354,15 @@ async function refresh(
     const localScan = scanLocalConversationActivity({
       sinceMs: startMs - 2 * 86400000,
     });
-    const localModels = scanLocalModelActivity({
-      sinceMs: startMs - 2 * 86400000,
-      untilMs: endMs,
-    });
+    // AI code-tracking only lists chats that produced code hashes;
+    // composerData (state.vscdb) carries the picker model for every chat.
+    const localModels = mergeLocalModelActivity([
+      scanLocalModelActivity({
+        sinceMs: startMs - 2 * 86400000,
+        untilMs: endMs,
+      }),
+      scanComposerModelActivity(),
+    ]);
 
     let aggregated;
     let filtered;
@@ -351,6 +435,7 @@ async function refresh(
       sand,
       period,
       prepaid,
+      analytics,
       rangeStartMs: startMs,
       rangeEndMs: endMs,
       rangeKind,
@@ -387,6 +472,7 @@ async function refresh(
         period,
         sand,
         prepaid,
+        analytics,
         aggregated,
         filtered,
         localConversations: localScan.conversations,

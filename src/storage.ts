@@ -33,6 +33,7 @@ export interface RawDashboardSnapshot {
   period?: unknown;
   sand?: unknown;
   prepaid?: unknown;
+  analytics?: unknown;
   aggregated?: unknown;
   filtered?: unknown;
   localConversations?: unknown;
@@ -42,9 +43,17 @@ export interface RawDashboardSnapshot {
   rangeKind?: string;
 }
 
+/** How long a workspace-store lock may live before it is treated as orphaned. */
+const LOCK_STALE_MS = 15_000;
+/** Give up acquiring the lock after this and proceed unlocked (never wedge). */
+const LOCK_TIMEOUT_MS = 5_000;
+
 export class LocalStore {
   private readonly dir: string;
   private maintenanceDone = false;
+  /** Serializes all JSON writes from this process (one extension host). */
+  private writeQueue: Promise<void> = Promise.resolve();
+  private tmpCounter = 0;
 
   constructor(globalStorageUri: vscode.Uri) {
     this.dir = globalStorageUri.fsPath;
@@ -63,13 +72,60 @@ export class LocalStore {
    * Crash-safe write: write to a sibling `.tmp` file then rename over the
    * target so a mid-write crash cannot truncate a good cache file.
    */
+  /** Run `fn` after all previously queued writes settle, success or failure. */
+  private enqueueWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.writeQueue.then(fn);
+    this.writeQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  /**
+   * Cross-process lock (each Cursor window is its own extension host).
+   * Best-effort: on timeout the caller proceeds unlocked rather than wedging.
+   * Returns the release function.
+   */
+  private async acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
+    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        const handle = await fs.open(lockPath, "wx");
+        await handle.writeFile(`${process.pid} ${new Date().toISOString()}`);
+        return async () => {
+          await handle.close().catch(() => undefined);
+          await fs.unlink(lockPath).catch(() => undefined);
+        };
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") {
+          throw e;
+        }
+        try {
+          const st = await fs.stat(lockPath);
+          if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+            await fs.unlink(lockPath).catch(() => undefined);
+            continue;
+          }
+        } catch {
+          continue; // Lock vanished between open and stat; retry.
+        }
+        if (Date.now() >= deadline) {
+          return async () => undefined;
+        }
+        await new Promise((r) => setTimeout(r, 25 + Math.random() * 50));
+      }
+    }
+  }
+
   private async writeJsonAtomic(
     filePath: string,
     value: unknown,
     pretty = false
   ): Promise<void> {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    const tmp = `${filePath}.${process.pid}.${Date.now()}.${this.tmpCounter++}.tmp`;
     const body = pretty
       ? JSON.stringify(value, null, 2)
       : JSON.stringify(value);
@@ -144,10 +200,48 @@ export class LocalStore {
     }
   }
 
-  async saveWorkspaceStore(store: WorkspaceStore): Promise<void> {
+  private async writeWorkspaceStoreFile(store: WorkspaceStore): Promise<void> {
     await this.ensureDir();
     pruneClosedWindows(store);
     await this.writeJsonAtomic(path.join(this.dir, STORE_FILE), store, true);
+  }
+
+  async saveWorkspaceStore(store: WorkspaceStore): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const release = await this.acquireFileLock(
+        path.join(this.dir, `${STORE_FILE}.lock`)
+      );
+      try {
+        await this.writeWorkspaceStoreFile(store);
+      } finally {
+        await release();
+      }
+    });
+  }
+
+  /**
+   * Load → mutate → save the workspace store as one serialized, locked step,
+   * so overlapping refreshes and other Cursor windows cannot lose each
+   * other's updates between a separate load and save. The mutator runs
+   * synchronously; return `false` to skip saving (nothing changed).
+   */
+  async updateWorkspaceStore(
+    mutator: (store: WorkspaceStore) => boolean | void
+  ): Promise<WorkspaceStore> {
+    return this.enqueueWrite(async () => {
+      const release = await this.acquireFileLock(
+        path.join(this.dir, `${STORE_FILE}.lock`)
+      );
+      try {
+        const store = await this.loadWorkspaceStore();
+        if (mutator(store) !== false) {
+          await this.writeWorkspaceStoreFile(store);
+        }
+        return store;
+      } finally {
+        await release();
+      }
+    });
   }
 
   async clearWorkspaceStats(): Promise<void> {
@@ -188,9 +282,11 @@ export class LocalStore {
    * history file (at most one file per calendar day).
    */
   async saveCachedDashboard(data: DashboardData): Promise<void> {
-    await this.ensureDir();
-    await this.writeJsonAtomic(path.join(this.dir, CACHE_FILE), data, true);
-    await this.writeDailyHistory(data);
+    return this.enqueueWrite(async () => {
+      await this.ensureDir();
+      await this.writeJsonAtomic(path.join(this.dir, CACHE_FILE), data, true);
+      await this.writeDailyHistory(data);
+    });
   }
 
   private async writeDailyHistory(data: DashboardData): Promise<void> {
@@ -269,6 +365,12 @@ export class LocalStore {
   }
 
   async saveRawSnapshot(snapshot: RawDashboardSnapshot): Promise<void> {
+    return this.enqueueWrite(() => this.writeRawSnapshot(snapshot));
+  }
+
+  private async writeRawSnapshot(
+    snapshot: RawDashboardSnapshot
+  ): Promise<void> {
     await this.ensureDir();
     const slim = slimRawSnapshot(snapshot);
     const body = JSON.stringify(slim);

@@ -65,53 +65,52 @@ export class WorkspaceUsageTracker {
   constructor(private readonly store: LocalStore) {}
 
   async onActivate(): Promise<void> {
-    const data = await this.store.loadWorkspaceStore();
     const now = new Date().toISOString();
     const sid = sessionId();
-    this.closeSessionWindows(data, sid, now);
-    this.migrateLegacyNoFolder(data);
     const { workspaceId, displayName } = currentWorkspaceIdentity();
-    data.windows.push({
-      workspaceId,
-      displayName,
-      startedAt: now,
-      sessionId: sid,
-      lastFocusedAt: now,
+    await this.store.updateWorkspaceStore((data) => {
+      this.closeSessionWindows(data, sid, now);
+      this.migrateLegacyNoFolder(data);
+      data.windows.push({
+        workspaceId,
+        displayName,
+        startedAt: now,
+        sessionId: sid,
+        lastFocusedAt: now,
+      });
     });
-    await this.store.saveWorkspaceStore(data);
   }
 
   async onWorkspaceChange(): Promise<void> {
-    const data = await this.store.loadWorkspaceStore();
     const now = new Date().toISOString();
     const sid = sessionId();
-    this.closeSessionWindows(data, sid, now);
     const { workspaceId, displayName } = currentWorkspaceIdentity();
-    data.windows.push({
-      workspaceId,
-      displayName,
-      startedAt: now,
-      sessionId: sid,
-      lastFocusedAt: now,
+    await this.store.updateWorkspaceStore((data) => {
+      this.closeSessionWindows(data, sid, now);
+      data.windows.push({
+        workspaceId,
+        displayName,
+        startedAt: now,
+        sessionId: sid,
+        lastFocusedAt: now,
+      });
     });
-    await this.store.saveWorkspaceStore(data);
   }
 
   /** Call when this Cursor window gains focus — helps multi-window fallback. */
   async onWindowFocus(): Promise<void> {
-    const data = await this.store.loadWorkspaceStore();
     const now = new Date().toISOString();
     const sid = sessionId();
-    let changed = false;
-    for (const w of data.windows) {
-      if (!w.endedAt && w.sessionId === sid) {
-        w.lastFocusedAt = now;
-        changed = true;
+    await this.store.updateWorkspaceStore((data) => {
+      let changed = false;
+      for (const w of data.windows) {
+        if (!w.endedAt && w.sessionId === sid) {
+          w.lastFocusedAt = now;
+          changed = true;
+        }
       }
-    }
-    if (changed) {
-      await this.store.saveWorkspaceStore(data);
-    }
+      return changed; // false → skip the write entirely
+    });
   }
 
   /**
@@ -132,7 +131,10 @@ export class WorkspaceUsageTracker {
       clearStaleBilled?: boolean;
     }
   ): Promise<WorkspaceStat[]> {
-    const data = await this.store.loadWorkspaceStore();
+    let stats: WorkspaceStat[] = [];
+    // Whole rebuild runs inside the store's locked update so a concurrent
+    // window's focus/refresh update cannot be overwritten by our stale copy.
+    await this.store.updateWorkspaceStore((data) => {
     this.migrateLegacyNoFolder(data);
     this.migrateEstimatedFlags(data);
     const nowIso = new Date().toISOString();
@@ -228,8 +230,8 @@ export class WorkspaceUsageTracker {
     }
     // Collapse aliases first, then persist so reloads keep one row per folder
     // and retain tokensEstimated (pending vs billed).
-    const stats = this.toStats(data, pendingFlags);
-    await this.store.saveWorkspaceStore(data);
+    stats = this.toStats(data, pendingFlags);
+    });
     return stats;
   }
 
@@ -317,12 +319,13 @@ export class WorkspaceUsageTracker {
   }
 
   async getStats(): Promise<WorkspaceStat[]> {
-    const data = await this.store.loadWorkspaceStore();
-    this.migrateLegacyNoFolder(data);
-    this.migrateEstimatedFlags(data);
-    this.ensureOpenWorkspaces(data);
-    const stats = this.toStats(data);
-    await this.store.saveWorkspaceStore(data);
+    let stats: WorkspaceStat[] = [];
+    await this.store.updateWorkspaceStore((data) => {
+      this.migrateLegacyNoFolder(data);
+      this.migrateEstimatedFlags(data);
+      this.ensureOpenWorkspaces(data);
+      stats = this.toStats(data);
+    });
     return stats;
   }
 

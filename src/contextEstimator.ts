@@ -100,6 +100,33 @@ export function emptyContextUsage(): ContextUsageView {
   };
 }
 
+/** True when a context-only poll would not change the dashboard box. */
+export function contextUsageEqual(
+  a: ContextUsageView,
+  b: ContextUsageView
+): boolean {
+  if (a.estimated !== b.estimated) {
+    return false;
+  }
+  if (a.usedTokens !== b.usedTokens || a.windowTokens !== b.windowTokens) {
+    return false;
+  }
+  if (Math.round(a.percentFull) !== Math.round(b.percentFull)) {
+    return false;
+  }
+  if (a.categories.length !== b.categories.length) {
+    return false;
+  }
+  for (let i = 0; i < a.categories.length; i++) {
+    const ca = a.categories[i];
+    const cb = b.categories[i];
+    if (ca.id !== cb.id || ca.tokens !== cb.tokens) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function estimateFromFiles(roots: string[]): ContextUsageView {
   const rules = estimateRules(roots);
   const skills = estimateSkills(roots);
@@ -299,6 +326,14 @@ function workspaceConversationIds(roots: string[]): Set<string> {
 function loadComposerDataRows(
   dbPath: string
 ): Array<{ key: string; value: string }> {
+  // Direct read first — copying a several-hundred-MB state.vscdb (sync, on the
+  // extension-host thread) on every refresh is the expensive fallback.
+  const direct =
+    tryNodeSqliteComposerRows(dbPath) ?? tryPythonSqliteComposerRows(dbPath);
+  if (direct !== undefined) {
+    return direct;
+  }
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-usage-ctx-"));
   const tmpDb = path.join(tmpDir, "state.vscdb");
   try {

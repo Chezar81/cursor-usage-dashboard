@@ -10,8 +10,9 @@ import { dayKeyLocal } from "./dates";
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Cap transcript reads so a huge chat cannot stall refresh. */
-const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
+/** Safety cap for transcript reads so a huge chat cannot stall refresh. */
+const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 
 /** One local agent chat discovered under ~/.cursor/projects. */
 export interface LocalConversationActivity {
@@ -153,6 +154,8 @@ function transcriptLastActiveMs(
 
 /**
  * Rough billed-token stand-in from transcript text (chars ÷ 4).
+ * Streams the whole transcript (up to the safety cap): reading only the
+ * head would shrink the estimate the longer a chat runs.
  * Returns 0 when the file is missing or unreadable.
  */
 export function estimateTranscriptTokens(
@@ -168,10 +171,41 @@ export function estimateTranscriptTokens(
     }
     const fd = fs.openSync(transcriptFile, "r");
     try {
-      const toRead = Math.min(st.size, MAX_TRANSCRIPT_BYTES);
-      const buf = Buffer.alloc(toRead);
-      const n = fs.readSync(fd, buf, 0, toRead, 0);
-      return estimateTokensFromJsonl(buf.toString("utf8", 0, n));
+      const limit = Math.min(st.size, MAX_TRANSCRIPT_BYTES);
+      const chunk = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
+      let leftover = Buffer.alloc(0);
+      let read = 0;
+      let chars = 0;
+      while (read < limit) {
+        const n = fs.readSync(
+          fd,
+          chunk,
+          0,
+          Math.min(chunk.length, limit - read),
+          read
+        );
+        if (n <= 0) {
+          break;
+        }
+        read += n;
+        // 0x0A never appears inside a multi-byte UTF-8 sequence, so
+        // splitting the byte stream at the last newline is safe.
+        const data =
+          leftover.length > 0
+            ? Buffer.concat([leftover, chunk.subarray(0, n)])
+            : Buffer.from(chunk.subarray(0, n));
+        const cut = data.lastIndexOf(0x0a);
+        if (cut < 0) {
+          leftover = data;
+          continue;
+        }
+        chars += countJsonlChars(data.subarray(0, cut).toString("utf8"));
+        leftover = Buffer.from(data.subarray(cut + 1));
+      }
+      if (leftover.length > 0) {
+        chars += countJsonlChars(leftover.toString("utf8"));
+      }
+      return chars > 0 ? Math.max(1, Math.round(chars / 4)) : 0;
     } finally {
       fs.closeSync(fd);
     }
@@ -297,6 +331,14 @@ function textFromContent(content: unknown): string {
 }
 
 export function estimateTokensFromJsonl(raw: string): number {
+  const chars = countJsonlChars(raw);
+  if (chars <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.round(chars / 4));
+}
+
+function countJsonlChars(raw: string): number {
   let chars = 0;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -309,10 +351,7 @@ export function estimateTokensFromJsonl(raw: string): number {
       chars += trimmed.length;
     }
   }
-  if (chars <= 0) {
-    return 0;
-  }
-  return Math.max(1, Math.round(chars / 4));
+  return chars;
 }
 
 function countMessageChars(value: unknown): number {

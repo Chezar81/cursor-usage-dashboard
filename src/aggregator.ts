@@ -9,6 +9,7 @@ import {
   formatLocalModelLabel,
   type LocalModelActivity,
 } from "./localModelActivity";
+import { isAutoModelIntent } from "./modelRouting";
 import type {
   AggregatedUsageEventsResponse,
   AuthMe,
@@ -25,6 +26,8 @@ import type {
   TrendMeta,
   TrendRangeKind,
   UsageSummary,
+  UserAnalyticsDay,
+  UserAnalyticsResponse,
   UserPrepaidBilling,
   WorkspaceStat,
 } from "./types";
@@ -298,77 +301,10 @@ function modelRowKey(modelIntent: string, model: string): string {
   return `${modelIntent}\0${model}`;
 }
 
-function emptyModelRow(modelIntent: string, model: string): ModelBreakdown {
-  return {
-    modelIntent,
-    model,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    totalTokens: 0,
-    costCents: 0,
-  };
-}
-
-export function modelsFromAggregated(
-  agg: AggregatedUsageEventsResponse | undefined
-): ModelBreakdown[] {
-  const list = agg?.aggregations ?? [];
-  const map = new Map<string, ModelBreakdown>();
-  for (const row of list) {
-    const { modelIntent, model } = resolveModelNames(row);
-    const key = modelRowKey(modelIntent, model);
-    let dest = map.get(key);
-    if (!dest) {
-      dest = emptyModelRow(modelIntent, model);
-      map.set(key, dest);
-    }
-    dest.inputTokens += num(row.inputTokens);
-    dest.outputTokens += num(row.outputTokens);
-    dest.cacheReadTokens += num(row.cacheReadTokens);
-    dest.cacheWriteTokens += num(row.cacheWriteTokens);
-    dest.costCents += num(row.totalCents ?? row.costCents);
-  }
-  const models = [...map.values()].map((m) => ({
-    ...m,
-    totalTokens:
-      m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens,
-  }));
-  models.sort((a, b) => b.costCents - a.costCents || b.totalTokens - a.totalTokens);
-  return models;
-}
-
-export function modelsFromEvents(events: FilteredUsageEvent[]): ModelBreakdown[] {
-  const map = new Map<string, ModelBreakdown>();
-  for (const ev of events) {
-    const { modelIntent, model } = resolveModelNames(ev);
-    const key = modelRowKey(modelIntent, model);
-    let row = map.get(key);
-    if (!row) {
-      row = emptyModelRow(modelIntent, model);
-      map.set(key, row);
-    }
-    const t = ev.tokenUsage;
-    row.inputTokens += num(t?.inputTokens);
-    row.outputTokens += num(t?.outputTokens);
-    row.cacheReadTokens += num(t?.cacheReadTokens);
-    row.cacheWriteTokens += num(t?.cacheWriteTokens);
-    row.costCents += eventCostCents(ev);
-  }
-  for (const row of map.values()) {
-    row.totalTokens =
-      row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens;
-  }
-  return [...map.values()].sort(
-    (a, b) => b.costCents - a.costCents || b.totalTokens - a.totalTokens
-  );
-}
-
 /**
- * API model rows are authoritative for tokens/cost. Local tracking fills in
- * provisional rows for chats whose conversationId is not yet in the API —
- * those drop away automatically once Cursor publishes matching events.
+ * API / analytics model rows are the ones shown. Local tracking enriches a
+ * matching row (same display label) with transcript estimates; only labels
+ * with no API/analytics row stay as separate “pending” provisional rows.
  */
 export function mergeModelsWithLocal(input: {
   apiModels: ModelBreakdown[];
@@ -441,12 +377,36 @@ export function mergeModelsWithLocal(input: {
   const apiRows = input.apiModels.map((m) => ({
     ...m,
     localPending: false as boolean | undefined,
-    pendingConversations: undefined as number | undefined,
-    tokensEstimated: false as boolean | undefined,
+    pendingConversations: m.pendingConversations,
+    tokensEstimated: m.tokensEstimated,
   }));
 
-  const provisional: ModelBreakdown[] = [...pendingByLabel.entries()].map(
-    ([label, entry]) => ({
+  const apiByLabel = new Map<string, ModelBreakdown>();
+  for (const row of apiRows) {
+    const label = formatLocalModelLabel(row.model || row.modelIntent);
+    if (!apiByLabel.has(label)) {
+      apiByLabel.set(label, row);
+    }
+  }
+
+  const provisional: ModelBreakdown[] = [];
+  for (const [label, entry] of pendingByLabel) {
+    const existing = apiByLabel.get(label);
+    if (existing) {
+      // One row: API/analytics primary, enriched with local transcript data.
+      existing.pendingConversations = entry.ids.size;
+      const hasBilled =
+        existing.totalTokens > 0 ||
+        existing.costCents > 0 ||
+        (existing.inputTokens || 0) > 0 ||
+        (existing.outputTokens || 0) > 0;
+      if (!hasBilled && entry.estimatedTokens > 0) {
+        existing.totalTokens = entry.estimatedTokens;
+        existing.tokensEstimated = true;
+      }
+      continue;
+    }
+    provisional.push({
       modelIntent: label,
       model: label,
       inputTokens: 0,
@@ -458,8 +418,8 @@ export function mergeModelsWithLocal(input: {
       localPending: true,
       pendingConversations: entry.ids.size,
       tokensEstimated: entry.estimatedTokens > 0,
-    })
-  );
+    });
+  }
   provisional.sort(
     (a, b) =>
       b.totalTokens - a.totalTokens ||
@@ -467,7 +427,61 @@ export function mergeModelsWithLocal(input: {
       a.modelIntent.localeCompare(b.modelIntent)
   );
 
-  return [...apiRows, ...provisional];
+  return dedupeModelsByLabel([...apiRows, ...provisional]);
+}
+
+/**
+ * One row per display label. API/analytics rows win; local estimates and
+ * chat counts fold into them. Safety net so a label never appears twice.
+ */
+export function dedupeModelsByLabel(models: ModelBreakdown[]): ModelBreakdown[] {
+  const byLabel = new Map<string, ModelBreakdown>();
+  for (const row of models) {
+    const label = formatLocalModelLabel(row.model || row.modelIntent);
+    const prev = byLabel.get(label);
+    if (!prev) {
+      byLabel.set(label, { ...row, model: label, modelIntent: label });
+      continue;
+    }
+    const apiFirst = !row.localPending
+      ? row
+      : !prev.localPending
+        ? prev
+        : row;
+    const other = apiFirst === row ? prev : row;
+    const apiHasBilled =
+      !apiFirst.tokensEstimated &&
+      (apiFirst.totalTokens > 0 ||
+        apiFirst.costCents > 0 ||
+        (apiFirst.inputTokens || 0) > 0 ||
+        (apiFirst.outputTokens || 0) > 0);
+    const estTokens = Math.max(
+      apiFirst.tokensEstimated ? apiFirst.totalTokens : 0,
+      other.tokensEstimated ? other.totalTokens : 0,
+      !apiHasBilled ? Math.max(apiFirst.totalTokens, other.totalTokens) : 0
+    );
+    byLabel.set(label, {
+      ...apiFirst,
+      model: label,
+      modelIntent: label,
+      localPending: false,
+      analyticsRequests:
+        Math.max(apiFirst.analyticsRequests ?? 0, other.analyticsRequests ?? 0) ||
+        undefined,
+      autoRequests: Math.max(apiFirst.autoRequests ?? 0, other.autoRequests ?? 0) || undefined,
+      manualRequests:
+        Math.max(apiFirst.manualRequests ?? 0, other.manualRequests ?? 0) ||
+        undefined,
+      pendingConversations:
+        Math.max(
+          apiFirst.pendingConversations ?? 0,
+          other.pendingConversations ?? 0
+        ) || undefined,
+      totalTokens: apiHasBilled ? apiFirst.totalTokens : estTokens,
+      tokensEstimated: apiHasBilled ? false : estTokens > 0,
+    });
+  }
+  return [...byLabel.values()];
 }
 
 function emptyDailyPoint(date: string): DailyPoint {
@@ -479,7 +493,155 @@ function emptyDailyPoint(date: string): DailyPoint {
     localPendingConversations: 0,
     localEstimatedTokens: 0,
     matchedConversations: 0,
+    apiRequests: 0,
+    includedRequests: 0,
+    usageBasedRequests: 0,
   };
+}
+
+/**
+ * Days from get-user-analytics that fall inside the dashboard window.
+ * Analytics dates are UTC midnights; dayKeyLocal matches the Trend axis.
+ */
+export function analyticsDaysInRange(
+  analytics: UserAnalyticsResponse | null | undefined,
+  rangeStartMs: number,
+  rangeEndMs: number
+): UserAnalyticsDay[] {
+  const rows = analytics?.dailyMetrics ?? [];
+  const out: UserAnalyticsDay[] = [];
+  for (const day of rows) {
+    const ms = asDateMs(day.date);
+    if (ms === undefined) {
+      continue;
+    }
+    // Include the UTC day if it overlaps the chart window at all.
+    const dayEnd = ms + 86400000 - 1;
+    if (dayEnd < rangeStartMs || ms > rangeEndMs) {
+      continue;
+    }
+    out.push(day);
+  }
+  return out;
+}
+
+/** Overlay analytics request counts onto daily Trend points. */
+export function mergeDailyWithAnalytics(
+  daily: DailyPoint[],
+  analyticsDays: UserAnalyticsDay[]
+): DailyPoint[] {
+  if (!analyticsDays.length) {
+    return daily;
+  }
+  const byDay = new Map(daily.map((d) => [d.date, { ...d }]));
+  for (const day of analyticsDays) {
+    const ms = asDateMs(day.date);
+    if (ms === undefined) {
+      continue;
+    }
+    const key = dayKeyLocal(ms);
+    let point = byDay.get(key);
+    if (!point) {
+      point = emptyDailyPoint(key);
+      byDay.set(key, point);
+    }
+    point.apiRequests = num(day.agentRequests);
+    point.includedRequests = num(day.subscriptionIncludedReqs);
+    point.usageBasedRequests = num(day.usageBasedReqs);
+  }
+  return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Aggregate analytics modelUsage into ModelBreakdown request rows.
+ * Used when billed token events are empty (unified Grok billing).
+ */
+export function modelsFromAnalytics(
+  analyticsDays: UserAnalyticsDay[]
+): ModelBreakdown[] {
+  const byModel = new Map<string, ModelBreakdown>();
+  for (const day of analyticsDays) {
+    for (const row of day.modelUsage ?? []) {
+      const raw = typeof row.name === "string" ? row.name.trim() : "";
+      if (!raw) {
+        continue;
+      }
+      const label = formatLocalModelLabel(raw);
+      const count = Math.max(0, num(row.count));
+      if (count <= 0) {
+        continue;
+      }
+      let entry = byModel.get(label);
+      if (!entry) {
+        entry = {
+          modelIntent: label,
+          model: label,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 0,
+          costCents: 0,
+          analyticsRequests: 0,
+          autoRequests: 0,
+          manualRequests: 0,
+        };
+        byModel.set(label, entry);
+      }
+      entry.analyticsRequests = (entry.analyticsRequests ?? 0) + count;
+      if (isAutoModelIntent(raw)) {
+        entry.autoRequests = (entry.autoRequests ?? 0) + count;
+      } else {
+        entry.manualRequests = (entry.manualRequests ?? 0) + count;
+      }
+    }
+  }
+  return [...byModel.values()].sort(
+    (a, b) =>
+      (b.analyticsRequests ?? 0) - (a.analyticsRequests ?? 0) ||
+      a.model.localeCompare(b.model)
+  );
+}
+
+/**
+ * Prefer billed event/aggregated model rows when they have tokens or cost.
+ * Otherwise use analytics request rows. Local estimates enrich a matching
+ * label in place (never a second duplicate row).
+ */
+export function mergeModelsWithAnalytics(input: {
+  apiModels: ModelBreakdown[];
+  analyticsModels: ModelBreakdown[];
+  events: FilteredUsageEvent[];
+  localConversations: LocalConversationActivity[];
+  localModels: LocalModelActivity[];
+  rangeStartMs: number;
+  rangeEndMs: number;
+}): ModelBreakdown[] {
+  const apiHasBilled = input.apiModels.some(
+    (m) => m.totalTokens > 0 || m.costCents > 0
+  );
+  const base = apiHasBilled
+    ? input.apiModels.map((m) => ({ ...m }))
+    : input.analyticsModels.map((m) => ({ ...m }));
+
+  const merged = mergeModelsWithLocal({
+    apiModels: base,
+    events: input.events,
+    localConversations: input.localConversations,
+    localModels: input.localModels,
+    rangeStartMs: input.rangeStartMs,
+    rangeEndMs: input.rangeEndMs,
+  });
+
+  if (!apiHasBilled && input.analyticsModels.length > 0) {
+    merged.sort(
+      (a, b) =>
+        (b.analyticsRequests ?? 0) - (a.analyticsRequests ?? 0) ||
+        b.totalTokens - a.totalTokens ||
+        a.model.localeCompare(b.model)
+    );
+  }
+  return merged;
 }
 
 /**
@@ -753,6 +915,9 @@ export function buildTrendMeta(input: {
   /** Newest event Cursor has published, even if it is outside the chart window. */
   latestKnownEventMs?: number;
   usageEventsFetchStrategy?: TrendMeta["usageEventsFetchStrategy"];
+  /** Unified SAND/Grok billing (sand.isUnified) — see TrendMeta.apiEventsUnavailable. */
+  unifiedBilling?: boolean;
+  analyticsDays?: UserAnalyticsDay[];
 }): TrendMeta {
   const matchedIds = apiConversationIds(input.events);
   let lastEventMs: number | undefined;
@@ -783,6 +948,17 @@ export function buildTrendMeta(input: {
     lastEventMs = input.latestKnownEventMs;
     lastEventBeforeWindow = input.latestKnownEventMs < input.rangeStartMs;
   }
+
+  // Unified Grok/SAND billing publishes the pool % (get-sand-usage-status /
+  // get-current-period-usage) but no per-chat rows on the legacy event
+  // endpoints — verified live: an unbounded filtered query returns only the
+  // events from before the current period started. Once the period is more
+  // than a day old with still zero in-window events, this is not lag.
+  const apiEventsUnavailable =
+    input.unifiedBilling === true &&
+    lastEventBeforeWindow &&
+    input.events.length === 0 &&
+    Date.now() - input.rangeStartMs > 24 * 3600_000;
 
   const pendingConversations = pending.length;
   const matchedConversations = matchedIds.size;
@@ -818,6 +994,25 @@ export function buildTrendMeta(input: {
   if (matchedConversations > 0) {
     parts.push(`${matchedConversations} matched`);
   }
+  const analyticsRequests = (input.analyticsDays ?? []).reduce(
+    (s, d) => s + num(d.agentRequests),
+    0
+  );
+  const analyticsAvailable =
+    (input.analyticsDays?.length ?? 0) > 0 && analyticsRequests > 0;
+
+  if (apiEventsUnavailable) {
+    parts.push(
+      analyticsAvailable
+        ? "per-chat token events not published for unified billing — request counts sync from Cursor analytics; token figures are local estimates"
+        : "per-chat API events not published for unified billing — local estimates are primary"
+    );
+  }
+  if (analyticsAvailable) {
+    parts.push(
+      `${analyticsRequests} analytics request${analyticsRequests === 1 ? "" : "s"}`
+    );
+  }
   if (input.usageEventsFetchStrategy && input.usageEventsFetchStrategy !== "primary") {
     parts.push(`events loaded via ${input.usageEventsFetchStrategy}`);
   }
@@ -844,6 +1039,10 @@ export function buildTrendMeta(input: {
     pendingConversations,
     matchedConversations,
     eventsStale,
+    apiEventsUnavailable,
+    analyticsAvailable,
+    analyticsRequests: analyticsAvailable ? analyticsRequests : undefined,
+    preferRequestsMetric: apiEventsUnavailable && analyticsAvailable,
     lastEventBeforeWindow,
     usageEventsFetchStrategy: input.usageEventsFetchStrategy,
     note: parts.join(" · "),
@@ -902,6 +1101,7 @@ export function buildDashboardData(input: {
   sand?: SandUsageStatus | null;
   period?: PeriodUsage | null;
   prepaid?: UserPrepaidBilling | null;
+  analytics?: UserAnalyticsResponse | null;
   rangeStartMs: number;
   rangeEndMs: number;
   rangeKind: TrendRangeKind;
@@ -918,13 +1118,20 @@ export function buildDashboardData(input: {
   const events = input.filtered?.usageEventsDisplay ?? [];
   const localConversations = input.localConversations ?? [];
   const localModels = input.localModels ?? [];
+  const analyticsDays = analyticsDaysInRange(
+    input.analytics,
+    input.rangeStartMs,
+    input.rangeEndMs
+  );
   // Group by routed model so Auto sessions show what actually served each request.
   const apiModels =
     events.length > 0
       ? modelsGroupedByRoutedModel(events)
       : modelsGroupedByRoutedFromAggregated(input.aggregated?.aggregations ?? []);
-  const models = mergeModelsWithLocal({
+  const analyticsModels = modelsFromAnalytics(analyticsDays);
+  const models = mergeModelsWithAnalytics({
     apiModels,
+    analyticsModels,
     events,
     localConversations,
     localModels,
@@ -957,11 +1164,14 @@ export function buildDashboardData(input: {
     input.period,
     input.prepaid
   );
-  const daily = dailyFromEvents(
-    events,
-    input.rangeStartMs,
-    input.rangeEndMs,
-    localConversations
+  const daily = mergeDailyWithAnalytics(
+    dailyFromEvents(
+      events,
+      input.rangeStartMs,
+      input.rangeEndMs,
+      localConversations
+    ),
+    analyticsDays
   );
   const sessions = sessionsFromActivity({
     events,
@@ -979,6 +1189,8 @@ export function buildDashboardData(input: {
     rangeStartMs: input.rangeStartMs,
     latestKnownEventMs: input.latestKnownEventMs,
     usageEventsFetchStrategy: input.usageEventsFetchStrategy,
+    unifiedBilling: input.sand?.isUnified === true,
+    analyticsDays,
   });
 
   return {

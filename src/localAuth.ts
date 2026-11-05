@@ -69,7 +69,22 @@ export function findStateDbPath(): string | undefined {
   return candidates.find((p) => fs.existsSync(p));
 }
 
+async function tryReadAccessToken(dbPath: string): Promise<string | undefined> {
+  return (
+    (await tryNodeSqlite(dbPath)) ??
+    (await tryPythonSqlite(dbPath)) ??
+    trySqliteCli(dbPath)
+  );
+}
+
 async function readAccessToken(dbPath: string): Promise<string | undefined> {
+  // Direct read-only first: state.vscdb can be hundreds of MB, so copying it
+  // on every refresh is the expensive path, not the normal one.
+  const direct = await tryReadAccessToken(dbPath);
+  if (direct) {
+    return direct;
+  }
+
   // Copy to avoid "database is locked" while Cursor holds a WAL write lock.
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "cursor-usage-"));
   const tmpDb = path.join(tmpDir, "state.vscdb");
@@ -86,17 +101,7 @@ async function readAccessToken(dbPath: string): Promise<string | undefined> {
       }
     }
 
-    const fromNode = await tryNodeSqlite(tmpDb);
-    if (fromNode) {
-      return fromNode;
-    }
-
-    const fromPython = await tryPythonSqlite(tmpDb);
-    if (fromPython) {
-      return fromPython;
-    }
-
-    return trySqliteCli(tmpDb);
+    return tryReadAccessToken(tmpDb);
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }

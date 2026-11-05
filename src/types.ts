@@ -133,6 +133,33 @@ export interface UserPrepaidBilling {
   [key: string]: unknown;
 }
 
+/**
+ * Live activity from get-user-analytics — works on unified Grok billing
+ * even when per-chat token events are empty. Counts requests, not tokens.
+ */
+export interface UserAnalyticsResponse {
+  period?: {
+    startDate?: string | number;
+    endDate?: string | number;
+  };
+  dailyMetrics?: UserAnalyticsDay[];
+  [key: string]: unknown;
+}
+
+export interface UserAnalyticsDay {
+  /** Epoch ms (often UTC midnight as string). */
+  date?: string | number;
+  agentRequests?: number;
+  subscriptionIncludedReqs?: number;
+  usageBasedReqs?: number;
+  modelUsage?: Array<{ name?: string; count?: number }>;
+  linesAdded?: number;
+  linesDeleted?: number;
+  totalApplies?: number;
+  totalAccepts?: number;
+  [key: string]: unknown;
+}
+
 export interface ModelBreakdown {
   /** Selected / requested model (Cursor `modelIntent`). */
   modelIntent: string;
@@ -160,6 +187,11 @@ export interface ModelBreakdown {
   autoRequests?: number;
   /** Usage events with an explicit non-Auto model intent. */
   manualRequests?: number;
+  /**
+   * Agent request count from get-user-analytics for this model (live on
+   * unified billing; not the same as billed token events).
+   */
+  analyticsRequests?: number;
 }
 
 export interface DailyPoint {
@@ -178,6 +210,12 @@ export interface DailyPoint {
   localEstimatedTokens: number;
   /** Distinct API conversationIds with events on this day. */
   matchedConversations: number;
+  /** Agent requests from get-user-analytics (live on unified billing). */
+  apiRequests?: number;
+  /** Included-pool requests from analytics. */
+  includedRequests?: number;
+  /** Usage-based / on-demand requests from analytics. */
+  usageBasedRequests?: number;
 }
 
 /**
@@ -225,6 +263,24 @@ export interface TrendMeta {
   matchedConversations: number;
   /** True when plan usage suggests activity but API events lag (or only local pending). */
   eventsStale: boolean;
+  /**
+   * True when Cursor is structurally not publishing per-chat token events
+   * for this account (unified SAND/Grok billing: pool % is live, but the
+   * filtered/aggregated event endpoints have returned nothing since the
+   * current period started >24h ago). Local estimates are then the primary
+   * per-chat source — they are not "waiting for the API to catch up".
+   * Clears automatically if billed events ever appear in the window.
+   */
+  apiEventsUnavailable?: boolean;
+  /** True when get-user-analytics returned daily metrics for this window. */
+  analyticsAvailable?: boolean;
+  /** Sum of analytics agentRequests in the chart window. */
+  analyticsRequests?: number;
+  /**
+   * Prefer the Requests trend metric when token events are unavailable but
+   * analytics request counts are live.
+   */
+  preferRequestsMetric?: boolean;
   /** How filtered usage events were loaded when the primary window was empty. */
   usageEventsFetchStrategy?:
     | "primary"

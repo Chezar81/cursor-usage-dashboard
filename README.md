@@ -4,7 +4,7 @@ Personal Cursor usage dashboard (webview + status bar) for your own account:
 
 - Current plan / cycle usage (included pool %, prepaid credits from grok.com billing, reset date)
 - Model breakdown (tokens + cost)
-- **Estimated** context-window breakdown (rules, skills, MCP, conversation, …) from local Cursor/project files
+- **Context Usage** from Cursor’s local composer tray (same source as the chat popup). While the dashboard is open and focused, this box re-reads locally about every 5s — no extra cursor.com traffic. Full Refresh still updates billing/models/trend.
 - Daily trend charts (tokens or spend), aligned with the weekly included window when that drives the plan ring. Click a day to list the agent chats from that day — title, project, model, and that day’s tokens and cost
 - **Local-first Trend / Models / workspaces**: agent transcripts and local AI-tracking model labels show up immediately as “pending API” with a rough transcript token estimate (`chars÷4`, prefixed `~`); when Cursor’s usage events include the same `conversationId`, billed token/cost figures replace the provisional rows
 - **Estimated** per-workspace usage from local chats + open-folder tracking
@@ -47,7 +47,7 @@ Then **Developer: Reload Window**, click the **Usage** status bar item, and refr
 
 ## Settings
 
-- `cursorUsage.refreshIntervalMinutes` — auto-refresh status bar + open dashboard while Cursor is focused (default `2`, min `1`).
+- `cursorUsage.refreshIntervalMinutes` — auto-refresh status bar + open dashboard while Cursor is focused (default `2`, min `1`). Billing/API sync only — Context Usage uses a separate local poll (~5s) while the dashboard tab is visible.
 - `cursorUsage.appearance` — `system` (follow Cursor's theme), `light`, or `dark`. The header icon cycles them: monitor, sun, moon.
 - `cursorUsage.currency` — `USD` or `EUR` (also switchable from the dashboard header).
 - `cursorUsage.eurPerUsd` — EUR per 1 USD when showing Euro (default `0.92`). Cursor amounts are USD; this rate is for display only.
@@ -81,6 +81,17 @@ Writes are atomic (temp → rename). Auto-refresh cannot bloat disk: history ove
 same day’s file, legacy per-refresh history files are deleted on maintenance, orphaned
 `.tmp` files are cleaned, and raw event arrays are not stored.
 
+## Unified Grok billing (no per-chat API events)
+
+On unified SAND/Grok plans (`get-sand-usage-status` → `isUnified: true`), Cursor publishes the weekly pool % and prepaid credits live, but **no per-chat rows** on `get-filtered-usage-events` / `get-aggregated-usage-events` — an unbounded event query returns only events from before the current period started (verified 2026-10-26: 14 events, all in the hour before the first weekly period; pool at 64% with zero events since). There is no alternate event endpoint.
+
+So for these accounts the dashboard treats local token figures as estimates instead of perpetually “pending API”:
+
+- **Live from Cursor:** weekly pool %, prepaid credits, and **`get-user-analytics`** daily agent request counts + model request mix (Trend → Requests; Models show analytics req counts).
+- **Local:** models also come from composer data (`state.vscdb` `composerData.modelConfig`, merged with the AI code-tracking DB); tokens are full-transcript estimates (`chars÷4`, prefixed `~`).
+
+Auto-refresh (default 2 min, plus on window focus) keeps both sides current. If Cursor ever starts publishing billed token events for the window, they automatically replace the local token rows (same `conversationId` matching as on classic plans).
+
 ## Privacy & caveats
 
 - Auto-auth reads the same local session Cursor already stores after login (read-only).
@@ -91,6 +102,7 @@ same day’s file, legacy per-refresh history files are deleted on maintenance, 
 
 ```bash
 npm install
+npm test        # typecheck + unit tests (aggregator, routing, dates, storage locking)
 npm run watch   # rebuild on change
 # F5 → Extension Development Host
 ```

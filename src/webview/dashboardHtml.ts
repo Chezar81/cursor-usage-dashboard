@@ -748,6 +748,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           <h2>Trend</h2>
           <div class="seg" role="tablist" aria-label="Trend metric">
             <button type="button" class="active" data-metric="tokens">Tokens</button>
+            <button type="button" data-metric="requests">Requests</button>
             <button type="button" data-metric="spend">Spend</button>
           </div>
         </div>
@@ -769,7 +770,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           <p class="section-sub">Estimated · local</p>
         </div>
         <p class="section-sub" style="margin:-6px 0 12px">
-          Local chats appear immediately with a rough transcript token estimate (~); billed totals replace them when Cursor’s usage API lists matching conversation IDs.
+          Local chats appear immediately with a rough transcript token estimate (~); billed totals replace them when Cursor’s usage API lists matching conversation IDs (it publishes none for unified Grok billing).
         </p>
         <div id="workspaces"></div>
       </div>
@@ -780,6 +781,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     const vscode = acquireVsCodeApi();
     let data = null;
     let metric = "tokens";
+    let metricUserSet = false;
     let selectedDay = null;
     let trendHits = [];
     let prefs = { currency: "USD", eurPerUsd: 0.92, appearance: "system" };
@@ -796,10 +798,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     });
     document.querySelectorAll("[data-metric]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        metric = btn.getAttribute("data-metric");
-        document.querySelectorAll("[data-metric]").forEach((b) =>
-          b.classList.toggle("active", b === btn)
-        );
+        metric = btn.getAttribute("data-metric") || "tokens";
+        metricUserSet = true;
+        syncMetricToggle();
         drawTrend();
       });
     });
@@ -835,6 +836,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       if (msg?.type === "data") {
         data = msg.payload;
         render();
+      } else if (msg?.type === "contextUsage" && data && msg.payload) {
+        data = { ...data, contextUsage: msg.payload };
+        renderContextUsage();
       } else if (msg?.type === "prefs" && data) {
         render();
       }
@@ -883,6 +887,13 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     function fmtEstTokens(n) {
       if (n == null || !Number.isFinite(n) || n <= 0) return "—";
       return "~" + fmtTokens(n);
+    }
+    /** Pill on local-only rows: 'Local' when the API structurally publishes
+        no per-chat events for this plan, else 'Pending API'. */
+    function pendingPillLabel() {
+      return data && data.trend && data.trend.apiEventsUnavailable
+        ? "Local"
+        : "Pending API";
     }
     /** Cursor amounts are USD cents; convert for display. */
     function fmtCents(c) {
@@ -941,6 +952,12 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       return v || fallback;
     }
 
+    function syncMetricToggle() {
+      document.querySelectorAll("[data-metric]").forEach((b) =>
+        b.classList.toggle("active", b.getAttribute("data-metric") === metric)
+      );
+    }
+
     function render() {
       if (!data) return;
       try {
@@ -951,43 +968,34 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             ? "Session missing or expired. Sign in to Cursor again, then refresh."
             : "");
         const trend = data.trend || {};
+        if (trend.preferRequestsMetric && !metricUserSet) {
+          metric = "requests";
+        }
+        syncMetricToggle();
         const windowName =
           trend.rangeKind === "weekly" ? "weekly window" : "billing window";
         const lastApiWhen = trend.lastEventAt
           ? fmtDate(trend.lastEventAt) + " (" + fmtAgo(trend.lastEventAt) + ")"
           : "";
-        const lastApiLabel = trend.lastEventBeforeWindow && lastApiWhen
-          ? "Newest API event is before this " + windowName + ": " + lastApiWhen
-          : lastApiWhen
-            ? "Newest usage event " + lastApiWhen
-            : "No usage events in this " + windowName + " yet";
-        const lastApiClause = trend.lastEventBeforeWindow && lastApiWhen
-          ? "newest API event is before this " + windowName + " (" + lastApiWhen + ")"
-          : lastApiWhen
-            ? "newest event " + lastApiWhen
-            : "none in this " + windowName;
-        const staleMsg =
-          !errMsg && trend.eventsStale
-            ? trend.pendingConversations > 0
-              ? "Token events from Cursor are lagging — " +
-                lastApiClause +
-                ". Showing " +
-                trend.pendingConversations +
-                " local chat" +
-                (trend.pendingConversations === 1 ? "" : "s") +
-                " with rough transcript estimates (~) — billed totals replace them when the API catches up."
-              : "Included usage is up, but Cursor has not published token events for this window yet — " +
-                lastApiClause +
-                ". Trend tokens may appear later."
-            : "";
+        const lastApiLabel = trend.apiEventsUnavailable
+          ? (trend.analyticsAvailable
+              ? "Analytics synced · " +
+                (Number(trend.analyticsRequests) || 0) +
+                " requests · per-chat tokens not published (last token event " +
+                (lastApiWhen || "never") +
+                ")"
+              : "Per-chat API events not published for unified billing (last published " +
+                (lastApiWhen || "never") +
+                ")")
+          : trend.lastEventBeforeWindow && lastApiWhen
+            ? "Newest API event is before this " + windowName + ": " + lastApiWhen
+            : lastApiWhen
+              ? "Newest usage event " + lastApiWhen
+              : "No usage events in this " + windowName + " yet";
         if (errMsg) {
           banner.hidden = false;
           banner.classList.remove("info");
           bannerText.textContent = errMsg;
-        } else if (staleMsg) {
-          banner.hidden = false;
-          banner.classList.add("info");
-          bannerText.textContent = staleMsg;
         } else {
           banner.hidden = true;
           banner.classList.remove("info");
@@ -1093,9 +1101,69 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         "</div></div>";
     }
 
+    /**
+     * One row per model label: API/analytics wins, local estimates fold in.
+     * Guards against a stale extension host still sending duplicate rows.
+     */
+    function dedupeModels(list) {
+      const byLabel = new Map();
+      for (const row of list || []) {
+        const label = String(row.model || row.modelIntent || "unknown");
+        const prev = byLabel.get(label);
+        if (!prev) {
+          byLabel.set(label, { ...row, model: label, modelIntent: label });
+          continue;
+        }
+        const apiFirst = !row.localPending
+          ? row
+          : !prev.localPending
+            ? prev
+            : row;
+        const other = apiFirst === row ? prev : row;
+        const apiHasBilled =
+          !apiFirst.tokensEstimated &&
+          ((apiFirst.totalTokens || 0) > 0 || (apiFirst.costCents || 0) > 0);
+        const est = Math.max(
+          apiFirst.tokensEstimated ? apiFirst.totalTokens || 0 : 0,
+          other.tokensEstimated ? other.totalTokens || 0 : 0,
+          apiHasBilled
+            ? 0
+            : Math.max(apiFirst.totalTokens || 0, other.totalTokens || 0)
+        );
+        byLabel.set(label, {
+          ...apiFirst,
+          model: label,
+          modelIntent: label,
+          localPending: false,
+          analyticsRequests:
+            Math.max(apiFirst.analyticsRequests || 0, other.analyticsRequests || 0) ||
+            undefined,
+          autoRequests:
+            Math.max(apiFirst.autoRequests || 0, other.autoRequests || 0) ||
+            undefined,
+          manualRequests:
+            Math.max(apiFirst.manualRequests || 0, other.manualRequests || 0) ||
+            undefined,
+          pendingConversations:
+            Math.max(
+              apiFirst.pendingConversations || 0,
+              other.pendingConversations || 0
+            ) || undefined,
+          totalTokens: apiHasBilled ? apiFirst.totalTokens : est,
+          tokensEstimated: apiHasBilled ? false : est > 0,
+        });
+      }
+      return [...byLabel.values()].sort(
+        (a, b) =>
+          (b.analyticsRequests || 0) - (a.analyticsRequests || 0) ||
+          (b.totalTokens || 0) - (a.totalTokens || 0) ||
+          String(a.model).localeCompare(String(b.model))
+      );
+    }
+
     function renderModels() {
       const el = document.getElementById("models");
-      const allModels = data.models || [];
+      const allModels = dedupeModels(data.models || []);
       const models = allModels.slice(0, 5);
       const totals = data.totals || {};
       const apiRows = models.filter((m) => !m.localPending);
@@ -1110,35 +1178,56 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         return;
       }
 
+      const analyticsReqTotal = allModels.reduce(
+        (s, m) => s + (m.analyticsRequests || 0),
+        0
+      );
       const subParts = [];
       if (allModels.length > models.length) {
         subParts.push(allModels.length + " in this period");
       } else if (apiRows.length) {
         subParts.push(apiRows.length + " API");
       }
+      if (analyticsReqTotal > 0) {
+        subParts.push(
+          analyticsReqTotal +
+            " analytics req" +
+            (analyticsReqTotal === 1 ? "" : "s")
+        );
+      }
       if (pendingChats > 0) {
         subParts.push(
           pendingChats +
             " local chat" +
             (pendingChats === 1 ? "" : "s") +
-            " pending"
+            ((data.trend && data.trend.apiEventsUnavailable) ? " (local ~)" : " pending")
         );
       }
       const autoReqTotal = apiRows.reduce((s, m) => s + (m.autoRequests || 0), 0);
-      if (apiRows.length) {
+      if (apiRows.length && (totals.costCents || 0) > 0) {
         subParts.push(fmtCents(totals.costCents) + " total");
         subParts.push("by model that served the request");
         if (autoReqTotal > 0) {
           subParts.push(autoReqTotal + " Auto-routed req" + (autoReqTotal === 1 ? "" : "s"));
         }
+      } else if (analyticsReqTotal > 0) {
+        subParts.push("request counts from Cursor analytics · tokens local (~)");
       } else {
         subParts.push("local labels first — matched when API publishes events");
       }
       document.getElementById("models-sub").textContent = subParts.join(" · ");
 
+      const barByRequests = analyticsReqTotal > 0 &&
+        apiRows.every((m) => !(m.totalTokens > 0));
       const maxTokens = Math.max(
-        ...apiRows.map((m) => m.totalTokens),
-        ...pendingRows.map((m) => m.totalTokens || 0),
+        ...apiRows.map((m) =>
+          barByRequests ? (m.analyticsRequests || 0) : m.totalTokens
+        ),
+        ...pendingRows.map((m) =>
+          barByRequests
+            ? (m.analyticsRequests || m.totalTokens || 0)
+            : m.totalTokens || 0
+        ),
         1
       );
       const colors = ["var(--chart3)", "var(--chart)", "var(--chart2)", "var(--chart4)"];
@@ -1166,50 +1255,94 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               '<div class="model-name">' +
               escapeHtml(routed) +
               (m.localPending
-                ? "<span class='pending-pill' title='Local model from AI tracking / transcripts; waiting for Cursor usage API'>Pending API</span>"
+                ? "<span class='pending-pill' title='Local model from Cursor's local chat data; no billed API events for this chat'>" + pendingPillLabel() + "</span>"
                 : "") +
               "</div>";
 
             if (m.localPending) {
               const chats = m.pendingConversations || 0;
               const est = m.totalTokens || 0;
-              const pct = (est / maxTokens) * 100;
+              const aReq = m.analyticsRequests || 0;
+              const barVal = barByRequests ? aReq || est : est;
+              const pct = (barVal / maxTokens) * 100;
+              const metaBits = [];
+              if (aReq > 0) {
+                metaBits.push(aReq + " analytics req" + (aReq === 1 ? "" : "s"));
+              }
+              if (chats > 0) {
+                metaBits.push(
+                  chats + " local chat" + (chats === 1 ? "" : "s")
+                );
+              }
+              metaBits.push(
+                est > 0
+                  ? fmtEstTokens(est) + " from transcript (rough)"
+                  : "estimate when transcript readable"
+              );
               return (
                 '<div class="model-row">' +
                 "<div>" + title +
                 '<div class="model-meta">' +
-                chats +
-                " local chat" +
-                (chats === 1 ? "" : "s") +
-                " · " +
-                (est > 0
-                  ? fmtEstTokens(est) + " from transcript (rough)"
-                  : "estimate when transcript readable") +
+                metaBits.join(" · ") +
                 "</div></div>" +
                 '<div class="model-bar-cell"><div class="bar-track">' +
                 '<div class="bar-fill" style="width:' + pct + "%;background:" + pendingColor +
                 '"></div></div></div>' +
-                '<div class="model-cost" title="Cost unavailable until API events arrive">—</div>' +
+                '<div class="model-cost" title="Cost unavailable until billed API events arrive">' +
+                (aReq > 0 ? aReq + " req" : "—") +
+                "</div>" +
                 "</div>"
               );
             }
 
-            const pct = (m.totalTokens / maxTokens) * 100;
+            const aReq = m.analyticsRequests || 0;
+            const barVal = barByRequests ? aReq : m.totalTokens;
+            const pct = (barVal / maxTokens) * 100;
             const color = colors[i % colors.length];
+            const hasBilledTokens =
+              !m.tokensEstimated &&
+              ((m.totalTokens || 0) > 0 || (m.costCents || 0) > 0);
+            let meta = routeMeta
+              ? '<div class="model-meta">' + escapeHtml(routeMeta) + "</div>"
+              : "";
+            if (hasBilledTokens) {
+              meta +=
+                '<div class="model-meta">in ' + fmtTokens(m.inputTokens) +
+                " · out " + fmtTokens(m.outputTokens) +
+                " · cache " + fmtTokens(m.cacheReadTokens) +
+                "</div>";
+            } else if (aReq > 0) {
+              const bits = [
+                aReq + " analytics request" + (aReq === 1 ? "" : "s"),
+              ];
+              if (m.pendingConversations > 0) {
+                bits.push(
+                  m.pendingConversations +
+                    " local chat" +
+                    (m.pendingConversations === 1 ? "" : "s")
+                );
+              }
+              if (m.tokensEstimated && m.totalTokens > 0) {
+                bits.push(fmtEstTokens(m.totalTokens) + " transcript");
+              } else {
+                bits.push("tokens not published for this plan");
+              }
+              meta +=
+                '<div class="model-meta">' + bits.join(" · ") + "</div>";
+            }
             return (
               '<div class="model-row">' +
-              "<div>" + title +
-              (routeMeta
-                ? '<div class="model-meta">' + escapeHtml(routeMeta) + "</div>"
-                : "") +
-              '<div class="model-meta">in ' + fmtTokens(m.inputTokens) +
-              " · out " + fmtTokens(m.outputTokens) +
-              " · cache " + fmtTokens(m.cacheReadTokens) +
-              "</div></div>" +
+              "<div>" + title + meta + "</div>" +
               '<div class="model-bar-cell"><div class="bar-track">' +
               '<div class="bar-fill" style="width:' + pct + "%;background:" + color +
               '"></div></div></div>' +
-              '<div class="model-cost">' + fmtCents(m.costCents) + "</div>" +
+              '<div class="model-cost">' +
+              (hasBilledTokens
+                ? fmtCents(m.costCents)
+                : aReq > 0
+                  ? aReq + " req"
+                  : "—") +
+              "</div>" +
               "</div>"
             );
           })
@@ -1346,21 +1479,26 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       }
 
       const apiValues = daily.map((d) =>
-        metric === "spend" ? toDisplayAmount(d.costCents / 100) : d.tokens
+        metric === "spend"
+          ? toDisplayAmount(d.costCents / 100)
+          : metric === "requests"
+            ? d.apiRequests || 0
+            : d.tokens
       );
       // Tokens mode: plot local transcript estimates on the same token scale.
+      // Requests mode: local pending chat counts (analytics has no per-chat ids).
       // Spend mode: keep chat counts (no local cost estimate).
       const localValues = daily.map((d) =>
-        metric === "spend"
-          ? d.localPendingConversations || 0
-          : d.localEstimatedTokens || 0
+        metric === "tokens"
+          ? d.localEstimatedTokens || 0
+          : d.localPendingConversations || 0
       );
       const maxApi = Math.max(...apiValues, 0);
       const maxLocal = Math.max(...localValues, 0);
-      const sharedTokenScale = metric !== "spend";
+      const sharedTokenScale = metric === "tokens";
       const apiMax = sharedTokenScale
         ? Math.max(maxApi, maxLocal, 1)
-        : Math.max(maxApi, 0.01);
+        : Math.max(maxApi, metric === "spend" ? 0.01 : 1);
       const localMax = sharedTokenScale
         ? apiMax
         : Math.max(maxLocal, 1);
@@ -1377,14 +1515,22 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
       if (legend) {
         legend.hidden = false;
+        const apiLegend =
+          metric === "spend"
+            ? "API spend"
+            : metric === "requests"
+              ? "Cursor analytics requests"
+              : "API tokens";
+        const localLegend =
+          metric === "tokens"
+            ? "Local est. tokens (~)"
+            : "Local chats";
         legend.innerHTML =
-          '<span><i class="trend-swatch" aria-hidden="true"></i> API ' +
-          (metric === "spend" ? "spend" : "tokens") +
+          '<span><i class="trend-swatch" aria-hidden="true"></i> ' +
+          apiLegend +
           "</span>" +
           '<span><i class="trend-swatch pending" aria-hidden="true"></i> ' +
-          (metric === "spend"
-            ? "Local chats pending"
-            : "Local est. tokens (pending API)") +
+          localLegend +
           "</span>";
       }
 
@@ -1487,7 +1633,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           if (p.v <= 0) return;
           ctx.fillStyle = localColor;
           const label =
-            metric === "spend" ? String(p.v) : "~" + fmtTokens(p.v);
+            metric === "tokens" ? "~" + fmtTokens(p.v) : String(p.v);
           ctx.fillText(label, p.x, p.y - 6);
         });
         if (maxApi > 0) {
@@ -1495,7 +1641,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             if (p.v <= 0) return;
             ctx.fillStyle = apiColor;
             const label =
-              metric === "spend" ? moneySymbol() + p.v.toFixed(2) : fmtTokens(p.v);
+              metric === "spend"
+                ? moneySymbol() + p.v.toFixed(2)
+                : metric === "requests"
+                  ? String(Math.round(p.v))
+                  : fmtTokens(p.v);
             ctx.fillText(label, p.x, p.y - 6);
           });
         }
@@ -1507,15 +1657,19 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       const apiTopLabel =
-        metric === "spend" ? moneySymbol() + apiMax.toFixed(2) : fmtTokens(apiMax);
+        metric === "spend"
+          ? moneySymbol() + apiMax.toFixed(2)
+          : metric === "requests"
+            ? String(Math.round(apiMax)) + " req"
+            : fmtTokens(apiMax);
       ctx.fillText(apiTopLabel, pad.l - 8, pad.t);
       ctx.fillText("0", pad.l - 8, pad.t + plotH);
       ctx.textAlign = "left";
       ctx.fillStyle = localColor;
       ctx.fillText(
-        metric === "spend"
-          ? String(localMax) + " chats"
-          : "~" + fmtTokens(localMax),
+        metric === "tokens"
+          ? "~" + fmtTokens(localMax)
+          : String(localMax) + " chats",
         pad.l + plotW + 8,
         pad.t
       );
@@ -1624,7 +1778,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               escapeHtml(title) +
               "</span>" +
               (s.localPending
-                ? "<span class='pending-pill' title='Local chat seen; waiting for Cursor usage API. Token figure is a rough transcript estimate (chars÷4).'>Pending API</span>"
+                ? "<span class='pending-pill' title='Local chat; no billed API events for this chat. Token figure is a rough transcript estimate (chars÷4).'>" + pendingPillLabel() + "</span>"
                 : "") +
               "</td><td><span class='session-sub' title='" + escapeHtml(s.workspace || "") + "'>" +
               escapeHtml(s.workspace || "—") +
@@ -1666,7 +1820,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               escapeHtml(w.displayName) +
               "</span>" +
               (w.localPending
-                ? "<span class='pending-pill' title='Local chat seen; waiting for Cursor usage API. Token figure is a rough transcript estimate (chars÷4).'>Pending API</span>"
+                ? "<span class='pending-pill' title='Local chat; no billed API events for this chat. Token figure is a rough transcript estimate (chars÷4).'>" + pendingPillLabel() + "</span>"
                 : "") +
               "</td><td class='num' title='" +
               (w.tokensEstimated

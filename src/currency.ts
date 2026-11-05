@@ -46,14 +46,3 @@ export function formatMoneyFromUsdCents(
   }
   return `$${usd.toFixed(2)}`;
 }
-
-export function convertUsdAmount(
-  usdAmount: number,
-  prefs: CurrencyPrefs
-): number {
-  return prefs.currency === "EUR" ? usdAmount * prefs.eurPerUsd : usdAmount;
-}
-
-export function currencySymbol(prefs: CurrencyPrefs): string {
-  return prefs.currency === "EUR" ? "€" : "$";
-}

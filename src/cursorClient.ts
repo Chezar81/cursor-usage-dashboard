@@ -6,6 +6,7 @@ import type {
   PeriodUsage,
   SandUsageStatus,
   UsageSummary,
+  UserAnalyticsResponse,
   UserPrepaidBilling,
 } from "./types";
 
@@ -263,6 +264,24 @@ export class CursorDashboardClient {
     }
   }
 
+  /**
+   * Daily agent request counts + model mix. Live on unified Grok billing
+   * even when get-filtered-usage-events is empty for the current period.
+   */
+  async getUserAnalytics(): Promise<UserAnalyticsResponse | null> {
+    try {
+      return await this.postJson<UserAnalyticsResponse>(
+        "/api/dashboard/get-user-analytics",
+        {}
+      );
+    } catch (e) {
+      if (e instanceof CursorAuthError) {
+        throw e;
+      }
+      return null;
+    }
+  }
+
   private async getTokenOrThrow(): Promise<string> {
     const token = await this.getToken();
     if (!token?.trim()) {
@@ -281,14 +300,37 @@ export class CursorDashboardClient {
     return `WorkosCursorSessionToken=${token}`;
   }
 
+  /** Without a timeout a hung connection would wedge every later refresh. */
+  private async fetchWithTimeout(
+    path: string,
+    init: RequestInit
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20_000);
+    try {
+      return await fetch(`${BASE}${path}`, { ...init, signal: controller.signal });
+    } catch (e) {
+      if (controller.signal.aborted) {
+        throw new CursorApiError(
+          `Cursor API ${path} timed out after 20s`,
+          0,
+          path
+        );
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async getJson<T>(path: string): Promise<T> {
     const token = await this.getTokenOrThrow();
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await this.fetchWithTimeout(path, {
       method: "GET",
       headers: {
         Accept: "application/json",
         Cookie: this.cookieHeader(token),
-        "User-Agent": "CursorUsageDashboard/0.1",
+        "User-Agent": "CursorUsageDashboard/0.2",
       },
     });
     return this.parseResponse<T>(res, path);
@@ -296,7 +338,7 @@ export class CursorDashboardClient {
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
     const token = await this.getTokenOrThrow();
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await this.fetchWithTimeout(path, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -304,7 +346,7 @@ export class CursorDashboardClient {
         Cookie: this.cookieHeader(token),
         Origin: "https://cursor.com",
         Referer: "https://cursor.com/dashboard",
-        "User-Agent": "CursorUsageDashboard/0.1",
+        "User-Agent": "CursorUsageDashboard/0.2",
       },
       body: JSON.stringify(body),
     });

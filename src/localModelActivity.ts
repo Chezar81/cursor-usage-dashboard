@@ -2,6 +2,7 @@ import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { findStateDbPath } from "./localAuth";
 
 /** Local model hint from Cursor's AI code-tracking DB (per conversation). */
 export interface LocalModelActivity {
@@ -52,6 +53,15 @@ function readTrackingRows(
   sinceMs: number,
   untilMs: number
 ): RawRow[] {
+  // Direct read first; the copy below is only for a locked DB.
+  const direct =
+    tryNodeSqliteRows(dbPath, sinceMs, untilMs) ??
+    tryPythonSqliteRows(dbPath, sinceMs, untilMs) ??
+    trySqliteCliRows(dbPath, sinceMs, untilMs);
+  if (direct !== undefined) {
+    return direct;
+  }
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-usage-models-"));
   const tmpDb = path.join(tmpDir, "ai-code-tracking.db");
   try {
@@ -256,6 +266,216 @@ function pickLatestModelPerConversation(rows: RawRow[]): LocalModelActivity[] {
       lastActiveMs: v.lastActiveMs,
     }))
     .sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+}
+
+const COMPOSER_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Model label from a composerData `modelConfig` (state.vscdb).
+ * The picker value wins; `selectedModels` is the fallback for configs that
+ * only carry the selection list. "default" means the Auto picker.
+ */
+export function modelFromComposerConfig(modelConfig: unknown): string {
+  if (!modelConfig || typeof modelConfig !== "object") {
+    return "default";
+  }
+  const cfg = modelConfig as {
+    modelName?: unknown;
+    selectedModels?: unknown;
+  };
+  if (typeof cfg.modelName === "string" && cfg.modelName.trim()) {
+    return cfg.modelName.trim();
+  }
+  if (Array.isArray(cfg.selectedModels)) {
+    for (const sel of cfg.selectedModels) {
+      const id = (sel as { modelId?: unknown } | null)?.modelId;
+      if (typeof id === "string" && id.trim()) {
+        return id.trim();
+      }
+    }
+  }
+  return "default";
+}
+
+function isGenericModel(model: string): boolean {
+  const t = model.trim().toLowerCase();
+  return t === "" || t === "default" || t === "unknown" || t === "auto";
+}
+
+/**
+ * Merge model hints from several local sources (AI code-tracking DB,
+ * composerData, …). An explicit model always beats a generic "default",
+ * regardless of source; within the same class the newest activity wins.
+ */
+export function mergeLocalModelActivity(
+  sources: LocalModelActivity[][]
+): LocalModelActivity[] {
+  const best = new Map<string, LocalModelActivity>();
+  for (const source of sources) {
+    for (const row of source) {
+      const prev = best.get(row.conversationId);
+      if (!prev) {
+        best.set(row.conversationId, row);
+        continue;
+      }
+      const prevGeneric = isGenericModel(prev.model);
+      const rowGeneric = isGenericModel(row.model);
+      if (prevGeneric && !rowGeneric) {
+        best.set(row.conversationId, {
+          ...row,
+          lastActiveMs: Math.max(prev.lastActiveMs, row.lastActiveMs),
+        });
+      } else if (
+        prevGeneric === rowGeneric &&
+        row.lastActiveMs >= prev.lastActiveMs
+      ) {
+        best.set(row.conversationId, row);
+      } else {
+        prev.lastActiveMs = Math.max(prev.lastActiveMs, row.lastActiveMs);
+      }
+    }
+  }
+  return [...best.values()].sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+}
+
+/**
+ * Per-conversation model from Cursor's composerData in state.vscdb.
+ * Covers every chat (86+ composers), unlike the AI code-tracking DB, which
+ * only lists chats that produced tracked code hashes. `lastActiveMs` is the
+ * composer creation time — transcript activity refines the day elsewhere.
+ */
+export function scanComposerModelActivity(): LocalModelActivity[] {
+  const dbPath = findStateDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    return [];
+  }
+  const rows =
+    tryPythonComposerRows(dbPath) ?? tryNodeComposerRows(dbPath) ?? [];
+  const out: LocalModelActivity[] = [];
+  for (const row of rows) {
+    if (!COMPOSER_UUID_RE.test(row.conversationId)) {
+      continue;
+    }
+    out.push(row);
+  }
+  return out.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+}
+
+function tryPythonComposerRows(
+  dbPath: string
+): LocalModelActivity[] | undefined {
+  // Extract the small fields inside Python so multi-MB composerData values
+  // never cross the process boundary.
+  const script = [
+    "import sqlite3,sys,json",
+    "conn=sqlite3.connect(sys.argv[1])",
+    "out=[]",
+    "for k,v in conn.execute(\"SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'\"):",
+    "    try: d=json.loads(v.decode('utf-8','replace') if isinstance(v,bytes) else v)",
+    "    except Exception: continue",
+    "    mc=d.get('modelConfig') or {}",
+    "    model=(mc.get('modelName') or '').strip()",
+    "    if not model:",
+    "        for s in (mc.get('selectedModels') or []):",
+    "            mid=(s or {}).get('modelId')",
+    "            if mid: model=str(mid).strip(); break",
+    "    out.append({'conversationId':str(d.get('composerId') or ''),'model':model or 'default','ts':d.get('createdAt') or 0})",
+    "sys.stdout.write(json.dumps(out))",
+  ].join("\n");
+
+  for (const bin of ["python3", "python", "py"]) {
+    try {
+      const stdout = execFileSync(bin, ["-c", script, dbPath], {
+        timeout: 15000,
+        maxBuffer: 16 * 1024 * 1024,
+        encoding: "utf8",
+      });
+      const parsed = JSON.parse(String(stdout || "[]")) as Array<{
+        conversationId?: unknown;
+        model?: unknown;
+        ts?: unknown;
+      }>;
+      if (!Array.isArray(parsed)) {
+        return undefined;
+      }
+      return parsed
+        .map((r) => ({
+          conversationId:
+            typeof r.conversationId === "string" ? r.conversationId.trim() : "",
+          model: typeof r.model === "string" && r.model.trim() ? r.model.trim() : "default",
+          lastActiveMs: Number(r.ts) || 0,
+        }))
+        .filter((r) => r.conversationId);
+    } catch {
+      // try next interpreter
+    }
+  }
+  return undefined;
+}
+
+function tryNodeComposerRows(
+  dbPath: string
+): LocalModelActivity[] | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require("node:sqlite") as {
+      DatabaseSync: new (
+        path: string,
+        opts?: { readOnly?: boolean }
+      ) => {
+        prepare: (sql: string) => {
+          all: (...params: unknown[]) => Array<Record<string, unknown>>;
+        };
+        close: () => void;
+      };
+    };
+    const db = new mod.DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const rows = db
+        .prepare(
+          "SELECT value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
+        )
+        .all();
+      const out: LocalModelActivity[] = [];
+      for (const row of rows) {
+        const raw =
+          typeof row.value === "string"
+            ? row.value
+            : Buffer.isBuffer(row.value)
+              ? row.value.toString("utf8")
+              : "";
+        if (!raw) {
+          continue;
+        }
+        let data: {
+          composerId?: unknown;
+          modelConfig?: unknown;
+          createdAt?: unknown;
+        };
+        try {
+          data = JSON.parse(raw) as typeof data;
+        } catch {
+          continue;
+        }
+        const conversationId =
+          typeof data.composerId === "string" ? data.composerId.trim() : "";
+        if (!conversationId) {
+          continue;
+        }
+        out.push({
+          conversationId,
+          model: modelFromComposerConfig(data.modelConfig),
+          lastActiveMs: Number(data.createdAt) || 0,
+        });
+      }
+      return out;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 /** Display label for local tracking models. */
