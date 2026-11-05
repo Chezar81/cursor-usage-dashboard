@@ -739,10 +739,21 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     <section>
       <div class="panel">
         <div class="section-head">
-          <h2>Top 5 models</h2>
-          <p class="section-sub" id="models-sub">Routed models · Auto vs manual</p>
+          <h2>Trend</h2>
+          <div class="seg" role="tablist" aria-label="Trend metric">
+            <button type="button" class="active" data-metric="tokens">Tokens</button>
+            <button type="button" data-metric="requests">Requests</button>
+            <button type="button" data-metric="spend">Spend</button>
+          </div>
         </div>
-        <div id="models"></div>
+        <div class="chart-wrap"><canvas id="trend" aria-label="Daily usage. Click a day to list its chats."></canvas></div>
+        <div class="trend-legend" id="trend-legend" hidden>
+          <span><i class="trend-swatch" aria-hidden="true"></i> API tokens / spend</span>
+          <span><i class="trend-swatch pending" aria-hidden="true"></i> Local estimate (pending API)</span>
+        </div>
+        <p class="section-sub" id="trend-hint" style="margin-top:8px">Click a day to see its chats.</p>
+        <div id="day-sessions" class="day-sessions" hidden></div>
+        <p class="section-sub" id="trend-note" style="margin-top:10px"></p>
       </div>
     </section>
 
@@ -762,21 +773,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     <section>
       <div class="panel">
         <div class="section-head">
-          <h2>Trend</h2>
-          <div class="seg" role="tablist" aria-label="Trend metric">
-            <button type="button" class="active" data-metric="tokens">Tokens</button>
-            <button type="button" data-metric="requests">Requests</button>
-            <button type="button" data-metric="spend">Spend</button>
-          </div>
+          <h2>Top 5 models</h2>
+          <p class="section-sub" id="models-sub">Routed models · Auto vs manual</p>
         </div>
-        <div class="chart-wrap"><canvas id="trend" aria-label="Daily usage. Click a day to list its chats."></canvas></div>
-        <div class="trend-legend" id="trend-legend" hidden>
-          <span><i class="trend-swatch" aria-hidden="true"></i> API tokens / spend</span>
-          <span><i class="trend-swatch pending" aria-hidden="true"></i> Local estimate (pending API)</span>
-        </div>
-        <p class="section-sub" id="trend-hint" style="margin-top:8px">Click a day to see its chats.</p>
-        <div id="day-sessions" class="day-sessions" hidden></div>
-        <p class="section-sub" id="trend-note" style="margin-top:10px"></p>
+        <div id="models"></div>
       </div>
     </section>
 
@@ -1008,10 +1008,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           ? (trend.analyticsAvailable
               ? "Analytics synced · " +
                 (Number(trend.analyticsRequests) || 0) +
-                " requests · per-chat tokens not published (last token event " +
+                " requests · per-chat tokens not published\\n(last token event " +
                 (lastApiWhen || "never") +
                 ")"
-              : "Per-chat API events not published for unified billing (last published " +
+              : "Per-chat API events not published for unified billing\\n(last published " +
                 (lastApiWhen || "never") +
                 ")")
           : trend.lastEventBeforeWindow && lastApiWhen
