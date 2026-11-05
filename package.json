@@ -1,8 +1,8 @@
 {
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
-  "description": "Personal Cursor usage dashboard: plan cycle, model breakdown, trends, and estimated per-workspace tracking.",
-  "version": "0.2.3",
+  "description": "Unofficial personal Cursor usage dashboard (requires your Cursor sign-in): plan cycle, models, trends, and local estimates.",
+  "version": "0.2.4",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"

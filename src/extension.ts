@@ -307,15 +307,34 @@ async function refresh(
   try {
     const token = await resolveSessionToken(context);
     if (!token?.trim()) {
-      const data = emptyData(
-        "Could not read your Cursor login from this machine. Sign in to Cursor, then refresh. Manual cookie paste is only a fallback.",
-        true
-      );
+      // Local-only: Context Usage, transcripts, and workspace tracking still
+      // work without a Cursor session. Plan % / analytics need sign-in.
+      const endMs = Date.now();
+      const startMs = endMs - 30 * 86400000;
+      const localScan = scanLocalConversationActivity({
+        sinceMs: startMs - 2 * 86400000,
+      });
+      const localModels = mergeLocalModelActivity([
+        scanLocalModelActivity({ sinceMs: startMs - 2 * 86400000, untilMs: endMs }),
+        scanComposerModelActivity(),
+      ]);
+      const data = buildDashboardData({
+        rangeStartMs: startMs,
+        rangeEndMs: endMs,
+        rangeKind: "monthly",
+        localConversations: localScan.conversations,
+        localModels,
+        workspaces: [],
+        contextUsage: emptyContextUsage(),
+        error:
+          "Not signed into Cursor on this machine — showing local estimates only. Sign in (or set the manual token fallback), then refresh for plan %, credits, and analytics.",
+        authError: true,
+      });
       data.workspaces = await tracker.getStats();
       data.contextUsage = await estimateContextUsage(
         vscode.workspace.workspaceFolders
       );
-      await publish(data);
+      await publish(data, { skipCache: true });
       if (!opts?.silent) {
         vscode.window.showWarningMessage(data.error!);
       }

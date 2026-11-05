@@ -1,40 +1,56 @@
 # Cursor Usage Dashboard
 
-Personal Cursor usage dashboard (webview + status bar) for your own account:
+**Unofficial, personal tool** — not affiliated with Anysphere / Cursor. There is no official personal usage API; this extension calls the same unofficial `cursor.com` dashboard endpoints other community tools use. Those endpoints can change without notice.
 
-- Current plan / cycle usage (included pool %, prepaid credits from grok.com billing, reset date)
-- Model breakdown (tokens + cost)
-- **Context Usage** from Cursor’s local composer tray (same source as the chat popup). While the dashboard is open and focused, this box re-reads locally about every 5s — no extra cursor.com traffic. Full Refresh still updates billing/models/trend.
-- Daily trend charts (tokens or spend), aligned with the weekly included window when that drives the plan ring. Click a day to list the agent chats from that day — title, project, model, and that day’s tokens and cost
-- **Local-first Trend / Models / workspaces**: agent transcripts and local AI-tracking model labels show up immediately as “pending API” with a rough transcript token estimate (`chars÷4`, prefixed `~`); when Cursor’s usage events include the same `conversationId`, billed token/cost figures replace the provisional rows
+**Requires you to be signed into the Cursor app** on the machine where you install it. The extension never ships with anyone else’s credentials. Each user authorizes by their own local Cursor login (or an optional manual session-cookie fallback).
+
+Personal usage dashboard (webview + status bar) for **your own** account:
+
+- Current plan / cycle usage (included pool %, prepaid credits, reset date)
+- Model breakdown (tokens + cost, or analytics request counts on unified Grok billing)
+- **Context Usage** from Cursor’s local composer tray (same source as the chat popup). While the dashboard is open and focused, this box re-reads locally about every 5s — no extra cursor.com traffic
+- Daily trend charts (tokens, requests, or spend). Click a day to list that day’s chats
+- **Local-first** models / trend / workspaces: transcript estimates (`chars÷4`, prefixed `~`) appear immediately; billed API totals replace them when Cursor publishes matching `conversationId`s
 - **Estimated** per-workspace usage from local chats + open-folder tracking
 
-There is no official personal usage API. This extension uses the same unofficial `cursor.com` dashboard endpoints as other community tools.
+## Auth
 
-## Auth (automatic)
+### Automatic (recommended)
 
-**No browser cookie copy is required** while you are signed into the Cursor app.
-
-The extension reads your IDE session from Cursor’s local state database (`state.vscdb`, key `cursorAuth/accessToken`) and builds the dashboard cookie automatically — same approach as other community usage tools.
-
-Just install the extension, stay logged into Cursor, and open the dashboard.
+Stay signed into Cursor. The extension reads your IDE session from the local state DB (`state.vscdb`, key `cursorAuth/accessToken`) and builds the dashboard cookie itself. No browser cookie copy is required.
 
 ### Manual fallback
 
-Only if auto-detection fails (unusual): run **Cursor Usage: Set Session Token (manual fallback)** and paste `WorkosCursorSessionToken` from cursor.com cookies. That value is stored in SecretStorage.
+Only if auto-detection fails: run **Cursor Usage: Set Session Token (manual fallback)** and paste *your* `WorkosCursorSessionToken` from cursor.com cookies. That value is stored in this machine’s SecretStorage only.
 
-## Setup
+### What works if you are not signed in?
+
+| Feature | Without Cursor sign-in |
+| --- | --- |
+| Context Usage (local tray / file estimate) | Yes |
+| Local chat / model estimates (`~` tokens), sessions, workspace list | Yes (last ~30 days of local data) |
+| Plan %, prepaid credits, analytics request counts, billed token events | No — sign in and refresh |
+
+You will see an auth warning until you sign in; local sections still fill from this machine’s Cursor data.
+
+## Install (release)
+
+1. Download the `.vsix` from the [GitHub Releases](https://github.com/Chezar81/cursor-usage-dashboard/releases) page.
+2. In Cursor: **Extensions: Install from VSIX…** and pick the file (or `cursor --install-extension cursor-usage-dashboard-x.y.z.vsix`).
+3. Sign into Cursor if you have not already, then **Developer: Reload Window**.
+4. Click the **Usage** status bar item (or **Cursor Usage: Open Dashboard**).
+
+## Build from source
 
 ```bash
 npm install
+npm test
 npm run build
 npx vsce package --no-dependencies --allow-missing-repository
-cursor --install-extension ./cursor-usage-dashboard-0.2.1.vsix
+cursor --install-extension ./cursor-usage-dashboard-0.2.4.vsix
 ```
 
 Or press **F5** from this folder for an Extension Development Host.
-
-Then **Developer: Reload Window**, click the **Usage** status bar item, and refresh if needed.
 
 ## Commands
 
@@ -50,7 +66,7 @@ Then **Developer: Reload Window**, click the **Usage** status bar item, and refr
 - `cursorUsage.refreshIntervalMinutes` — auto-refresh status bar + open dashboard while Cursor is focused (default `2`, min `1`). Billing/API sync only — Context Usage uses a separate local poll (~5s) while the dashboard tab is visible.
 - `cursorUsage.appearance` — `system` (follow Cursor's theme), `light`, or `dark`. The header icon cycles them: monitor, sun, moon.
 - `cursorUsage.currency` — `USD` or `EUR` (also switchable from the dashboard header).
-- `cursorUsage.eurPerUsd` — EUR per 1 USD when showing Euro (default `0.92`). Cursor amounts are USD; this rate is for display only.
+- `cursorUsage.eurPerUsd` — EUR per 1 USD when displaying Euro (default `0.92`). Cursor amounts are USD; this rate is for display only.
 
 ## Workspaces (estimated)
 
@@ -61,9 +77,7 @@ Cursor does not attribute usage events to folders. This extension estimates loca
 3. The currently open folder is always listed (even at 0) so you can see where you are
 4. **Multi-window** — each Cursor window tracks its own open period (via `sessionId`); another window no longer closes this folder’s timer. Time-based fallback uses focus order when folders overlap.
 
-The dashboard labels this **Estimated (local)**. Chats that never left a local transcript (or ran on another machine) cannot be attributed. Agent chats with no folder open show up as **No workspace**. Filtered usage events are paginated so recent chats are not dropped after the first API page.
-
-Token counts come from Cursor’s usage events API when events include a matching `conversationId`. Until then the row shows a **Pending API** transcript estimate (`chars÷4`), which refreshes on each dashboard refresh. If a folder shows **0** while you are chatting there, those chats may lack a local transcript match — the row is still listed because the folder is open.
+The dashboard labels this **Estimated (local)**. Chats that never left a local transcript (or ran on another machine) cannot be attributed. Agent chats with no folder open show up as **No workspace**.
 
 ## Local cache (data loss protection)
 
@@ -81,28 +95,28 @@ Writes are atomic (temp → rename). Auto-refresh cannot bloat disk: history ove
 same day’s file, legacy per-refresh history files are deleted on maintenance, orphaned
 `.tmp` files are cleaned, and raw event arrays are not stored.
 
-## Unified Grok billing (no per-chat API events)
+## Unified Grok billing (no per-chat token events)
 
-On unified SAND/Grok plans (`get-sand-usage-status` → `isUnified: true`), Cursor publishes the weekly pool % and prepaid credits live, but **no per-chat rows** on `get-filtered-usage-events` / `get-aggregated-usage-events` — an unbounded event query returns only events from before the current period started (verified 2026-10-26: 14 events, all in the hour before the first weekly period; pool at 64% with zero events since). There is no alternate event endpoint.
+On unified SAND/Grok plans (`get-sand-usage-status` → `isUnified: true`), Cursor publishes the weekly pool % and prepaid credits live, but **no per-chat token rows** on `get-filtered-usage-events` / `get-aggregated-usage-events` for the current period. There is no alternate event endpoint.
 
-So for these accounts the dashboard treats local token figures as estimates instead of perpetually “pending API”:
+For these accounts the dashboard:
 
-- **Live from Cursor:** weekly pool %, prepaid credits, and **`get-user-analytics`** daily agent request counts + model request mix (Trend → Requests; Models show analytics req counts).
-- **Local:** models also come from composer data (`state.vscdb` `composerData.modelConfig`, merged with the AI code-tracking DB); tokens are full-transcript estimates (`chars÷4`, prefixed `~`).
+- **Live from Cursor:** weekly pool %, prepaid credits, and **`get-user-analytics`** daily agent request counts + model request mix (Trend → Requests)
+- **Local:** composer / tracking model labels; transcript token estimates (`~`)
 
-Auto-refresh (default 2 min, plus on window focus) keeps both sides current. If Cursor ever starts publishing billed token events for the window, they automatically replace the local token rows (same `conversationId` matching as on classic plans).
+If Cursor later publishes billed token events for the window, they automatically replace the local token rows (same `conversationId` matching as on classic plans).
 
 ## Privacy & caveats
 
-- Auto-auth reads the same local session Cursor already stores after login (read-only).
+- No account secrets are stored in this repository or in the published `.vsix`. Auth uses **your** local Cursor session (read-only) or a token you paste into SecretStorage on your machine.
 - Unofficial endpoints may change without notice; the UI surfaces errors when that happens.
-- Team Admin API and Marketplace publish are out of scope for v1.
+- Team Admin API and Marketplace publish are out of scope for this personal tool.
 
 ## Development
 
 ```bash
 npm install
-npm test        # typecheck + unit tests (aggregator, routing, dates, storage locking)
+npm test        # typecheck + unit tests
 npm run watch   # rebuild on change
 # F5 → Extension Development Host
 ```
