@@ -542,7 +542,15 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       color: var(--muted);
       font-variant-numeric: tabular-nums;
     }
+    .model-bar-cell {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
     .bar-track {
+      flex: 1;
+      min-width: 0;
       height: 7px;
       border-radius: 999px;
       background: color-mix(in srgb, var(--fg) 10%, transparent);
@@ -554,6 +562,15 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       border-radius: inherit;
       background: linear-gradient(90deg, var(--chart3), color-mix(in srgb, var(--chart) 70%, var(--chart3)));
       transition: width 0.75s var(--ease);
+    }
+    .bar-pct {
+      flex: 0 0 auto;
+      min-width: 3.4em;
+      text-align: right;
+      font-size: 0.75rem;
+      font-weight: 650;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
     }
     .model-cost {
       font-weight: 650;
@@ -914,6 +931,16 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       if (p == null || !Number.isFinite(p)) return "—";
       return p.toFixed(1) + "%";
     }
+    /** Share of all requests. Keeps sub-percent values readable. */
+    function fmtShare(pct) {
+      if (!Number.isFinite(pct) || pct <= 0) return "0%";
+      if (pct < 0.1) return "<0.1%";
+      if (pct < 10) {
+        const rounded = Math.round(pct * 10) / 10;
+        return (rounded % 1 === 0 ? String(rounded) : rounded.toFixed(1)) + "%";
+      }
+      return Math.round(pct) + "%";
+    }
     function fmtDate(s) {
       if (!s) return "—";
       const d = new Date(s);
@@ -1217,19 +1244,31 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       }
       document.getElementById("models-sub").textContent = subParts.join(" · ");
 
-      const barByRequests = analyticsReqTotal > 0 &&
-        apiRows.every((m) => !(m.totalTokens > 0));
-      const maxTokens = Math.max(
-        ...apiRows.map((m) =>
-          barByRequests ? (m.analyticsRequests || 0) : m.totalTokens
-        ),
-        ...pendingRows.map((m) =>
-          barByRequests
-            ? (m.analyticsRequests || m.totalTokens || 0)
-            : m.totalTokens || 0
-        ),
-        1
-      );
+      function requestsOf(m) {
+        if (analyticsReqTotal > 0) return m.analyticsRequests || 0;
+        return (m.autoRequests || 0) + (m.manualRequests || 0);
+      }
+      const requestTotal = allModels.reduce((s, m) => s + requestsOf(m), 0);
+      const shareByRequests = requestTotal > 0;
+      const maxTokens = shareByRequests
+        ? 1
+        : Math.max(
+            ...apiRows.map((m) => m.totalTokens || 0),
+            ...pendingRows.map((m) => m.totalTokens || 0),
+            1
+          );
+      function barMarkup(pct, color, requests) {
+        const width = Math.max(0, Math.min(100, pct));
+        const share = shareByRequests
+          ? '<span class="bar-pct" title="' + requests + " of " + requestTotal +
+            " requests" + '">' + fmtShare(width) + "</span>"
+          : "";
+        return (
+          '<div class="model-bar-cell"><div class="bar-track">' +
+          '<div class="bar-fill" style="width:' + width + "%;background:" + color +
+          '"></div></div>' + share + "</div>"
+        );
+      }
       const colors = ["var(--chart3)", "var(--chart)", "var(--chart2)", "var(--chart4)"];
       const pendingColor = "var(--chart2)";
 
@@ -1263,8 +1302,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               const chats = m.pendingConversations || 0;
               const est = m.totalTokens || 0;
               const aReq = m.analyticsRequests || 0;
-              const barVal = barByRequests ? aReq || est : est;
-              const pct = (barVal / maxTokens) * 100;
+              const req = requestsOf(m);
+              const pct = shareByRequests
+                ? (req / requestTotal) * 100
+                : (est / maxTokens) * 100;
               const metaBits = [];
               if (aReq > 0) {
                 metaBits.push(aReq + " analytics req" + (aReq === 1 ? "" : "s"));
@@ -1285,9 +1326,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 '<div class="model-meta">' +
                 metaBits.join(" · ") +
                 "</div></div>" +
-                '<div class="model-bar-cell"><div class="bar-track">' +
-                '<div class="bar-fill" style="width:' + pct + "%;background:" + pendingColor +
-                '"></div></div></div>' +
+                barMarkup(pct, pendingColor, req) +
                 '<div class="model-cost" title="Cost unavailable until billed API events arrive">' +
                 (aReq > 0 ? aReq + " req" : "—") +
                 "</div>" +
@@ -1296,8 +1335,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             }
 
             const aReq = m.analyticsRequests || 0;
-            const barVal = barByRequests ? aReq : m.totalTokens;
-            const pct = (barVal / maxTokens) * 100;
+            const req = requestsOf(m);
+            const pct = shareByRequests
+              ? (req / requestTotal) * 100
+              : ((m.totalTokens || 0) / maxTokens) * 100;
             const color = colors[i % colors.length];
             const hasBilledTokens =
               !m.tokensEstimated &&
@@ -1333,9 +1374,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             return (
               '<div class="model-row">' +
               "<div>" + title + meta + "</div>" +
-              '<div class="model-bar-cell"><div class="bar-track">' +
-              '<div class="bar-fill" style="width:' + pct + "%;background:" + color +
-              '"></div></div></div>' +
+              barMarkup(pct, color, req) +
               '<div class="model-cost">' +
               (hasBilledTokens
                 ? fmtCents(m.costCents)
