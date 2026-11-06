@@ -19,6 +19,7 @@ import type { LocalStore } from "./storage";
 import {
   NO_WORKSPACE_ID,
   NO_WORKSPACE_LABEL,
+  canonicalDisplayName,
   normalizeDisplayName,
   normalizeWorkspaceId,
 } from "./workspaceLabels";
@@ -672,6 +673,20 @@ export class WorkspaceUsageTracker {
 }
 
 function preferDisplayName(a: string, b: string): string {
+  // Known renames (AnonBrowser → MintShield): always keep the current name.
+  const canonA = canonicalDisplayName(a);
+  const canonB = canonicalDisplayName(b);
+  if (canonA !== a || canonB !== b) {
+    if (normalizeDisplayName(canonA) === normalizeDisplayName(canonB)) {
+      return canonA !== a ? canonA : canonB !== b ? canonB : canonA;
+    }
+    if (canonA !== a) {
+      return canonA;
+    }
+    if (canonB !== b) {
+      return canonB;
+    }
+  }
   // Prefer real folder names (underscores) over slug tails (hyphens).
   if (a.includes("_") && !b.includes("_")) {
     return a;

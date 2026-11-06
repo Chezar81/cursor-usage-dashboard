@@ -288,6 +288,84 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       gap: 12px;
       margin-bottom: 14px;
     }
+    .trend-toggles {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    /* Reuses .seg chrome; only extras for the menu + caret. */
+    .trend-range-dd {
+      position: relative;
+    }
+    .trend-range-dd > .trend-range-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 13.5rem;
+      white-space: nowrap;
+    }
+    .trend-range-btn:focus-visible {
+      outline: 1px solid var(--accent);
+      outline-offset: 1px;
+    }
+    .trend-range-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .trend-range-caret {
+      flex: 0 0 auto;
+      font-size: 0.7em;
+      line-height: 1;
+      color: var(--muted);
+      transform: translateY(0.05em);
+    }
+    .trend-range-dd.open .trend-range-caret {
+      transform: translateY(0.05em) rotate(180deg);
+    }
+    .trend-range-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      z-index: 20;
+      min-width: max(100%, 11.5rem);
+      margin: 0;
+      padding: 4px;
+      list-style: none;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      box-shadow: 0 10px 28px color-mix(in srgb, var(--fg) 14%, transparent);
+      max-height: 240px;
+      overflow: auto;
+    }
+    .trend-range-menu[hidden] {
+      display: none;
+    }
+    .trend-range-menu button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 7px 11px;
+      border: none;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--fg);
+      font: inherit;
+      font-size: 0.82rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .trend-range-menu button:hover,
+    .trend-range-menu button:focus-visible {
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+      outline: none;
+    }
+    .trend-range-menu button.active {
+      background: color-mix(in srgb, var(--fg) 10%, var(--bg));
+      font-weight: 600;
+    }
     h2 {
       margin: 0;
       font-size: 0.72rem;
@@ -740,10 +818,28 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       <div class="panel">
         <div class="section-head">
           <h2>Trend</h2>
-          <div class="seg" role="tablist" aria-label="Trend metric">
-            <button type="button" class="active" data-metric="tokens">Tokens</button>
-            <button type="button" data-metric="requests">Requests</button>
-            <button type="button" data-metric="spend">Spend</button>
+          <div class="trend-toggles">
+            <div class="seg trend-range-dd" id="trend-range-dd">
+              <button
+                type="button"
+                class="active trend-range-btn"
+                id="trend-range-btn"
+                aria-label="Trend period"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                title="Full from first use, or a single calendar month"
+              >
+                <span class="trend-range-label" id="trend-range-label">Full (from first use)</span>
+                <span class="trend-range-caret" aria-hidden="true">▾</span>
+              </button>
+              <ul class="trend-range-menu" id="trend-range-menu" role="listbox" hidden></ul>
+            </div>
+            <div class="seg" role="tablist" aria-label="Trend metric">
+              <button type="button" class="active" data-metric="requests">Requests</button>
+              <button type="button" data-metric="tokens">Tokens</button>
+              <button type="button" data-metric="code" title="Lines ±, applies, accepts from Cursor analytics (when published)">Code</button>
+              <button type="button" data-metric="spend" hidden>Spend</button>
+            </div>
           </div>
         </div>
         <div class="chart-wrap"><canvas id="trend" aria-label="Daily usage. Click a day to list its chats."></canvas></div>
@@ -796,13 +892,30 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
   <script>
     const vscode = acquireVsCodeApi();
+    const uiState = vscode.getState() || {};
     let data = null;
-    let metric = "tokens";
+    let metric = "requests";
     let metricUserSet = false;
+    /**
+     * "full" = first–last day with usage; "YYYY-MM" = that calendar month only.
+     * Legacy "auto" maps to "full".
+     */
+    let trendRange =
+      typeof uiState.trendRange === "string" &&
+      (/^\\d{4}-\\d{2}$/.test(uiState.trendRange) || uiState.trendRange === "full")
+        ? uiState.trendRange
+        : "full";
     let selectedDay = null;
     let trendHits = [];
     let prefs = { currency: "USD", eurPerUsd: 0.92, appearance: "system" };
     const RING_C = 2 * Math.PI * 54;
+
+    function persistUiState() {
+      vscode.setState({
+        ...(vscode.getState() || {}),
+        trendRange,
+      });
+    }
 
     document.getElementById("btn-refresh").addEventListener("click", () => {
       vscode.postMessage({ type: "refresh" });
@@ -815,11 +928,65 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     });
     document.querySelectorAll("[data-metric]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        metric = btn.getAttribute("data-metric") || "tokens";
+        metric = btn.getAttribute("data-metric") || "requests";
         metricUserSet = true;
         syncMetricToggle();
         drawTrend();
       });
+    });
+    function closeTrendRangeMenu() {
+      const dd = document.getElementById("trend-range-dd");
+      const btn = document.getElementById("trend-range-btn");
+      const menu = document.getElementById("trend-range-menu");
+      if (!dd || !btn || !menu) return;
+      dd.classList.remove("open");
+      menu.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+    }
+    function openTrendRangeMenu() {
+      const dd = document.getElementById("trend-range-dd");
+      const btn = document.getElementById("trend-range-btn");
+      const menu = document.getElementById("trend-range-menu");
+      if (!dd || !btn || !menu) return;
+      dd.classList.add("open");
+      menu.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+      const active = menu.querySelector("button.active");
+      if (active && active.focus) active.focus();
+    }
+    function setTrendRange(next) {
+      const value = next === "full" || /^\\d{4}-\\d{2}$/.test(String(next || "")) ? String(next) : "full";
+      if (value === trendRange) {
+        closeTrendRangeMenu();
+        return;
+      }
+      trendRange = value;
+      persistUiState();
+      syncTrendRangeLabel();
+      closeTrendRangeMenu();
+      drawTrend();
+      renderDaySessions();
+    }
+    document.getElementById("trend-range-btn").addEventListener("click", (event) => {
+      event.stopPropagation();
+      const menu = document.getElementById("trend-range-menu");
+      if (!menu) return;
+      if (menu.hidden) openTrendRangeMenu();
+      else closeTrendRangeMenu();
+    });
+    document.getElementById("trend-range-menu").addEventListener("click", (event) => {
+      const btn = event.target && event.target.closest ? event.target.closest("button[data-range]") : null;
+      if (!btn) return;
+      event.preventDefault();
+      setTrendRange(btn.getAttribute("data-range"));
+    });
+    document.addEventListener("click", (event) => {
+      const dd = document.getElementById("trend-range-dd");
+      if (!dd || dd.contains(event.target)) return;
+      closeTrendRangeMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeTrendRangeMenu();
     });
     document.querySelectorAll("[data-currency]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -985,6 +1152,149 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       );
     }
 
+    /** Any billed, analytics, or local signal that makes a day worth plotting. */
+    function dayHasActivity(d) {
+      if (!d) return false;
+      return (
+        (d.tokens || 0) > 0 ||
+        (d.costCents || 0) > 0 ||
+        (d.eventCount || 0) > 0 ||
+        (d.apiRequests || 0) > 0 ||
+        (d.includedRequests || 0) > 0 ||
+        (d.usageBasedRequests || 0) > 0 ||
+        (d.localEstimatedTokens || 0) > 0 ||
+        (d.localEstimatedRequests || 0) > 0 ||
+        (d.codingActivity || 0) > 0 ||
+        (d.localPendingConversations || 0) > 0 ||
+        (d.matchedConversations || 0) > 0
+      );
+    }
+
+    function monthKeyFromDay(isoDay) {
+      if (!isoDay || typeof isoDay !== "string" || isoDay.length < 7) return "";
+      return isoDay.slice(0, 7);
+    }
+
+    function formatMonthLabel(ym) {
+      const parts = String(ym || "").split("-").map((n) => Number(n));
+      if (parts.length < 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) {
+        return ym;
+      }
+      const dt = new Date(parts[0], parts[1] - 1, 1);
+      if (!Number.isFinite(dt.getTime())) return ym;
+      return dt.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    }
+
+    /** Distinct YYYY-MM keys that have activity, ascending. */
+    function activeMonthKeys(daily) {
+      const keys = [];
+      const seen = Object.create(null);
+      for (const d of daily || []) {
+        if (!dayHasActivity(d)) continue;
+        const key = monthKeyFromDay(d.date);
+        if (!key || seen[key]) continue;
+        seen[key] = true;
+        keys.push(key);
+      }
+      keys.sort();
+      return keys;
+    }
+
+    function trendRangeLabelFor(value) {
+      if (value === "full") return "Full (from first use)";
+      return formatMonthLabel(value);
+    }
+    function syncTrendRangeLabel() {
+      const label = document.getElementById("trend-range-label");
+      if (label) label.textContent = trendRangeLabelFor(trendRange);
+    }
+    function rebuildTrendRangeOptions(daily) {
+      const menu = document.getElementById("trend-range-menu");
+      if (!menu) return;
+      const months = activeMonthKeys(daily);
+      if (trendRange !== "full" && months.indexOf(trendRange) < 0) {
+        trendRange = "full";
+        persistUiState();
+      }
+      const options = [
+        { value: "full", label: "Full (from first use)" },
+        ...months.map((ym) => ({ value: ym, label: formatMonthLabel(ym) })),
+      ];
+      menu.innerHTML = options
+        .map(
+          (o) =>
+            '<li role="none"><button type="button" role="option" data-range="' +
+            escapeHtml(o.value) +
+            '"' +
+            (o.value === trendRange ? ' class="active" aria-selected="true"' : ' aria-selected="false"') +
+            ">" +
+            escapeHtml(o.label) +
+            "</button></li>"
+        )
+        .join("");
+      syncTrendRangeLabel();
+    }
+
+    /**
+     * full: first–last day with activity across the loaded window.
+     * YYYY-MM: that calendar month only (empty months fall back to full).
+     */
+    function sliceDailyForRange(daily) {
+      const all = Array.isArray(daily) ? daily : [];
+      if (!all.length) {
+        return { days: all, trimmed: false, hidden: 0, mode: "full" };
+      }
+
+      if (trendRange !== "full" && /^\\d{4}-\\d{2}$/.test(trendRange)) {
+        const monthDays = all.filter((d) => monthKeyFromDay(d.date) === trendRange);
+        if (!monthDays.length) {
+          return { days: all, trimmed: false, hidden: 0, mode: "full" };
+        }
+        let first = -1;
+        let last = -1;
+        for (let i = 0; i < monthDays.length; i++) {
+          if (dayHasActivity(monthDays[i])) {
+            if (first < 0) first = i;
+            last = i;
+          }
+        }
+        const days =
+          first < 0 ? monthDays : monthDays.slice(first, last + 1);
+        return {
+          days,
+          trimmed: days.length < all.length,
+          hidden: all.length - days.length,
+          from: days[0].date,
+          to: days[days.length - 1].date,
+          mode: "month",
+          month: trendRange,
+        };
+      }
+
+      let first = -1;
+      let last = -1;
+      for (let i = 0; i < all.length; i++) {
+        if (dayHasActivity(all[i])) {
+          if (first < 0) first = i;
+          last = i;
+        }
+      }
+      if (first < 0) {
+        return { days: all, trimmed: false, hidden: 0, mode: "full" };
+      }
+      if (first === 0 && last === all.length - 1) {
+        return { days: all, trimmed: false, hidden: 0, mode: "full" };
+      }
+      return {
+        days: all.slice(first, last + 1),
+        trimmed: true,
+        hidden: all.length - (last - first + 1),
+        from: all[first].date,
+        to: all[last].date,
+        mode: "full",
+      };
+    }
+
     function render() {
       if (!data) return;
       try {
@@ -995,10 +1305,39 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             ? "Session missing or expired. Sign in to Cursor again, then refresh."
             : "");
         const trend = data.trend || {};
-        if (trend.preferRequestsMetric && !metricUserSet) {
+        if (!metricUserSet) {
           metric = "requests";
         }
+        if (trend.spendTrendUnavailable && metric === "spend") {
+          metric = "requests";
+          metricUserSet = false;
+        }
+        rebuildTrendRangeOptions(data.daily || []);
         syncMetricToggle();
+        const hasCodingSeries =
+          Array.isArray(data.daily) &&
+          data.daily.some((d) => (d.codingActivity || 0) > 0);
+        document.querySelectorAll("[data-metric='code']").forEach((btn) => {
+          btn.hidden = !hasCodingSeries;
+          btn.disabled = !hasCodingSeries;
+          btn.title = hasCodingSeries
+            ? "Lines added/deleted, applies, accepts (get-user-analytics)"
+            : "No coding metrics in analytics for this window";
+        });
+        document.querySelectorAll("[data-metric='spend']").forEach((btn) => {
+          // No Cursor cost events → Spend adds nothing; hide the tab entirely.
+          const hide = !!trend.spendTrendUnavailable;
+          btn.hidden = hide;
+          btn.disabled = hide;
+          btn.title = hide
+            ? "Spend trend unavailable for this plan"
+            : "API spend";
+        });
+        if (!hasCodingSeries && metric === "code") {
+          metric = "requests";
+          metricUserSet = false;
+          syncMetricToggle();
+        }
         const windowName =
           trend.rangeKind === "weekly" ? "weekly window" : "billing window";
         const lastApiWhen = trend.lastEventAt
@@ -1023,6 +1362,16 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           banner.hidden = false;
           banner.classList.remove("info");
           bannerText.textContent = errMsg;
+        } else if (trend.analyticsLagging) {
+          banner.hidden = false;
+          banner.classList.add("info");
+          bannerText.textContent =
+            "Cursor analytics is behind your local chats right now. Requests use local day-bucketed turns (~) where Cursor under-reports; Tokens use local transcript estimates (~). Pool % still comes from Cursor.";
+        } else if (trend.apiEventsUnavailable) {
+          banner.hidden = false;
+          banner.classList.add("info");
+          bannerText.textContent =
+            "Cursor does not publish per-chat tokens or cost for this plan. Tokens show local day-bucketed transcript estimates (~); Requests come from Cursor analytics; Spend trend is unavailable (prepaid totals stay in Plan).";
         } else {
           banner.hidden = true;
           banner.classList.remove("info");
@@ -1493,11 +1842,43 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       const canvas = document.getElementById("trend");
       const note = document.getElementById("trend-note");
       const legend = document.getElementById("trend-legend");
-      const daily = (data && data.daily) || [];
+      const dailyAll = (data && data.daily) || [];
+      const sliced = sliceDailyForRange(dailyAll);
+      const daily = sliced.days;
       const trend = (data && data.trend) || {};
-      note.textContent =
-        trend.note ||
-        (daily.length ? daily.length + " days in window" : "No daily activity yet.");
+      if (metric === "spend" && trend.spendTrendUnavailable) {
+        note.textContent =
+          "Spend trend unavailable — Cursor does not publish per-chat costs for this plan. Prepaid / on-demand totals stay in Plan above.";
+      } else {
+        const base =
+          trend.note ||
+          (dailyAll.length ? dailyAll.length + " days in window" : "No daily activity yet.");
+        if (sliced.mode === "month" && sliced.month) {
+          note.textContent =
+            base +
+            " · " +
+            formatMonthLabel(sliced.month) +
+            " (" +
+            daily.length +
+            " day" +
+            (daily.length === 1 ? "" : "s") +
+            ")";
+        } else if (sliced.trimmed) {
+          note.textContent =
+            base +
+            " · Full from first use " +
+            fmtTrendDay(sliced.from) +
+            "–" +
+            fmtTrendDay(sliced.to) +
+            " (" +
+            daily.length +
+            " of " +
+            dailyAll.length +
+            " days)";
+        } else {
+          note.textContent = base;
+        }
+      }
 
       const ctx = canvas.getContext("2d");
       const dpr = window.devicePixelRatio || 1;
@@ -1517,28 +1898,47 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         selectedDay = null;
       }
 
-      const apiValues = daily.map((d) =>
-        metric === "spend"
-          ? toDisplayAmount(d.costCents / 100)
-          : metric === "requests"
-            ? d.apiRequests || 0
-            : d.tokens
-      );
-      // Tokens mode: plot local transcript estimates on the same token scale.
-      // Requests mode: local pending chat counts (analytics has no per-chat ids).
-      // Spend mode: keep chat counts (no local cost estimate).
-      const localValues = daily.map((d) =>
-        metric === "tokens"
-          ? d.localEstimatedTokens || 0
-          : d.localPendingConversations || 0
-      );
+      const noApiTokens = !!trend.apiEventsUnavailable;
+      const fillRequests = metric === "requests" && !!trend.analyticsLagging;
+      // Tokens without Cursor events: local day-bucketed estimates are primary.
+      // Requests: analytics blue, optionally filled with local turns when lagging;
+      //   dashed line always shows the full local turn series.
+      // Code: composite analytics score (lines ±, applies, accepts).
+      // Spend without Cursor events: no invented series (handled below + disabled tab).
+      const apiValues = daily.map((d) => {
+        if (metric === "spend") {
+          return noApiTokens ? 0 : toDisplayAmount(d.costCents / 100);
+        }
+        if (metric === "code") {
+          return d.codingActivity || 0;
+        }
+        if (metric === "requests") {
+          const api = d.apiRequests || 0;
+          const local = d.localEstimatedRequests || 0;
+          return fillRequests ? Math.max(api, local) : api;
+        }
+        if (noApiTokens) {
+          return d.localEstimatedTokens || 0;
+        }
+        return d.tokens;
+      });
+      const localValues = daily.map((d) => {
+        if (metric === "tokens") {
+          return noApiTokens ? 0 : d.localEstimatedTokens || 0;
+        }
+        if (metric === "requests") {
+          return d.localEstimatedRequests || 0;
+        }
+        return 0;
+      });
       const maxApi = Math.max(...apiValues, 0);
       const maxLocal = Math.max(...localValues, 0);
-      const sharedTokenScale = metric === "tokens";
-      const apiMax = sharedTokenScale
+      const sharedScale =
+        metric === "tokens" || metric === "requests";
+      const apiMax = sharedScale
         ? Math.max(maxApi, maxLocal, 1)
         : Math.max(maxApi, metric === "spend" ? 0.01 : 1);
-      const localMax = sharedTokenScale
+      const localMax = sharedScale
         ? apiMax
         : Math.max(maxLocal, 1);
 
@@ -1554,23 +1954,41 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
       if (legend) {
         legend.hidden = false;
-        const apiLegend =
-          metric === "spend"
-            ? "API spend"
-            : metric === "requests"
-              ? "Cursor analytics requests"
-              : "API tokens";
-        const localLegend =
-          metric === "tokens"
-            ? "Local est. tokens (~)"
-            : "Local chats";
-        legend.innerHTML =
-          '<span><i class="trend-swatch" aria-hidden="true"></i> ' +
-          apiLegend +
-          "</span>" +
-          '<span><i class="trend-swatch pending" aria-hidden="true"></i> ' +
-          localLegend +
-          "</span>";
+        if (metric === "spend" && trend.spendTrendUnavailable) {
+          legend.hidden = true;
+          legend.innerHTML = "";
+        } else if (metric === "code") {
+          legend.hidden = false;
+          legend.innerHTML =
+            '<span><i class="trend-swatch" aria-hidden="true"></i> Coding activity (analytics: lines ±, applies, accepts)</span>';
+        } else {
+          const apiLegend =
+            metric === "spend"
+              ? "API spend"
+              : metric === "requests"
+                ? fillRequests
+                  ? "Requests (Cursor, local ~ fill)"
+                  : "Cursor analytics requests"
+                : noApiTokens
+                  ? "Local est. tokens (~)"
+                  : "API tokens";
+          const showLocal =
+            metric === "requests" ||
+            (metric === "tokens" && !noApiTokens);
+          const localLegend =
+            metric === "tokens"
+              ? "Local est. tokens (~)"
+              : "Local est. requests (~)";
+          legend.innerHTML =
+            '<span><i class="trend-swatch" aria-hidden="true"></i> ' +
+            apiLegend +
+            "</span>" +
+            (showLocal
+              ? '<span><i class="trend-swatch pending" aria-hidden="true"></i> ' +
+                localLegend +
+                "</span>"
+              : "");
+        }
       }
 
       // Grid
@@ -1671,8 +2089,8 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         localPts.forEach((p) => {
           if (p.v <= 0) return;
           ctx.fillStyle = localColor;
-          const label =
-            metric === "tokens" ? "~" + fmtTokens(p.v) : String(p.v);
+            const label =
+              metric === "tokens" ? "~" + fmtTokens(p.v) : String(p.v);
           ctx.fillText(label, p.x, p.y - 6);
         });
         if (maxApi > 0) {
@@ -1684,7 +2102,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 ? moneySymbol() + p.v.toFixed(2)
                 : metric === "requests"
                   ? String(Math.round(p.v))
-                  : fmtTokens(p.v);
+                  : metric === "code"
+                    ? String(Math.round(p.v))
+                    : fmtTokens(p.v);
             ctx.fillText(label, p.x, p.y - 6);
           });
         }
@@ -1700,7 +2120,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           ? moneySymbol() + apiMax.toFixed(2)
           : metric === "requests"
             ? String(Math.round(apiMax)) + " req"
-            : fmtTokens(apiMax);
+            : metric === "code"
+              ? String(Math.round(apiMax))
+              : fmtTokens(apiMax);
       ctx.fillText(apiTopLabel, pad.l - 8, pad.t);
       ctx.fillText("0", pad.l - 8, pad.t + plotH);
       ctx.textAlign = "left";
@@ -1708,7 +2130,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       ctx.fillText(
         metric === "tokens"
           ? "~" + fmtTokens(localMax)
-          : String(localMax) + " chats",
+          : metric === "requests"
+            ? "~" + String(Math.round(localMax)) + " req"
+            : String(localMax) + " chats",
         pad.l + plotW + 8,
         pad.t
       );
@@ -1789,7 +2213,24 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       const bits = [rows.length + (rows.length === 1 ? " chat" : " chats")];
       if (point.tokens > 0) bits.push(fmtTokens(point.tokens));
       if (point.localEstimatedTokens > 0) {
-        bits.push(fmtEstTokens(point.localEstimatedTokens) + " pending");
+        bits.push(fmtEstTokens(point.localEstimatedTokens) + " local");
+      }
+      if ((point.apiRequests || 0) > 0) {
+        bits.push(point.apiRequests + " analytics req");
+      }
+      if ((point.codingActivity || 0) > 0) {
+        const parts = [];
+        if ((point.linesAdded || 0) > 0) parts.push("+" + point.linesAdded + " loc");
+        if ((point.linesDeleted || 0) > 0) parts.push("−" + point.linesDeleted + " loc");
+        if ((point.totalApplies || 0) > 0) parts.push(point.totalApplies + " applies");
+        if ((point.totalAccepts || 0) > 0) parts.push(point.totalAccepts + " accepts");
+        bits.push(
+          "coding " +
+            (parts.length ? parts.join(", ") : String(Math.round(point.codingActivity)) + " pts")
+        );
+      }
+      if ((point.localEstimatedRequests || 0) > 0) {
+        bits.push("~" + point.localEstimatedRequests + " local req");
       }
       if (point.costCents > 0) bits.push(fmtCents(point.costCents));
       bits.push("usage on this day");
@@ -1811,7 +2252,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             const extra = s.modelCount > 1 ? " +" + (s.modelCount - 1) : "";
             const tokens = s.tokensEstimated ? fmtEstTokens(s.tokens) : fmtTokens(s.tokens);
             const cost = s.localPending && !(s.costCents > 0) ? "—" : fmtCents(s.costCents);
-            const requests = s.localPending ? "—" : String(s.requests || 0);
+            const requests = s.localPending
+              ? (s.requests > 0 ? "~" + s.requests : "—")
+              : String(s.requests || 0);
             return (
               "<tr><td><span class='session-title' title='" + escapeHtml(title) + "'>" +
               escapeHtml(title) +

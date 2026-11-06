@@ -47,6 +47,8 @@ let contextPollTimer: ReturnType<typeof setInterval> | undefined;
 let lastData: DashboardData | undefined;
 let refreshing = false;
 let contextRefreshing = false;
+/** Singleflight: one DB read per refresh for all parallel Cursor API calls. */
+let sessionTokenPromise: Promise<string | undefined> | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   watchBundleReload(context);
@@ -218,15 +220,24 @@ async function refreshContextUsageOnly(): Promise<void> {
 async function resolveSessionToken(
   context: vscode.ExtensionContext
 ): Promise<string | undefined> {
-  try {
-    const ide = await resolveIdeSessionCookie();
-    if (ide) {
-      return ide;
-    }
-  } catch {
-    // fall through to manual token
+  if (sessionTokenPromise) {
+    return sessionTokenPromise;
   }
-  return context.secrets.get(TOKEN_SECRET_KEY);
+  sessionTokenPromise = (async () => {
+    try {
+      const ide = await resolveIdeSessionCookie();
+      if (ide?.trim()) {
+        return ide.trim();
+      }
+    } catch {
+      // fall through to manual token
+    }
+    const manual = await context.secrets.get(TOKEN_SECRET_KEY);
+    return manual?.trim();
+  })().finally(() => {
+    sessionTokenPromise = undefined;
+  });
+  return sessionTokenPromise;
 }
 
 async function setSessionToken(context: vscode.ExtensionContext): Promise<void> {
@@ -313,6 +324,7 @@ async function refresh(
       const startMs = endMs - 30 * 86400000;
       const localScan = scanLocalConversationActivity({
         sinceMs: startMs - 2 * 86400000,
+        cacheDir: store.storageDir,
       });
       const localModels = mergeLocalModelActivity([
         scanLocalModelActivity({ sinceMs: startMs - 2 * 86400000, untilMs: endMs }),
@@ -372,6 +384,7 @@ async function refresh(
     // Local-first: scan transcripts + tracking DB so Models/Trend fill before API.
     const localScan = scanLocalConversationActivity({
       sinceMs: startMs - 2 * 86400000,
+      cacheDir: store.storageDir,
     });
     // AI code-tracking only lists chats that produced code hashes;
     // composerData (state.vscdb) carries the picker model for every chat.
@@ -420,12 +433,8 @@ async function refresh(
     }
 
     let events = filtered?.usageEventsDisplay ?? [];
-    if (
-      usageEventsFetchStrategy === "primary-seconds" ||
-      usageEventsFetchStrategy === "wide-30d" ||
-      usageEventsFetchStrategy === "unbounded"
-    ) {
-      events = filterEventsToRange(events, startMs, endMs);
+    events = filterEventsToRange(events, startMs, endMs);
+    if (filtered) {
       filtered = {
         ...filtered,
         usageEventsDisplay: events,

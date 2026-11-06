@@ -3,12 +3,14 @@ import { test } from "node:test";
 import {
   analyticsDaysInRange,
   asDateMs,
+  boundsFromUserAnalyticsPeriod,
   buildDashboardData,
   buildPlanView,
   dailyFromEvents,
   eventCostCents,
   eventTokens,
   filterEventsToRange,
+  intersectMsRanges,
   dedupeModelsByLabel,
   mergeDailyWithAnalytics,
   mergeModelsWithAnalytics,
@@ -30,15 +32,26 @@ const at = (y: number, m: number, d: number, h = 12) =>
 function localConv(
   id: string,
   lastActiveMs: number,
-  estimatedTokens = 0
+  estimatedTokens = 0,
+  estimatedRequests = 0,
+  estimatedRequestsByDay?: Record<string, number>,
+  estimatedTokensByDay?: Record<string, number>
 ): LocalConversationActivity {
+  const dayKey = dayKeyLocal(lastActiveMs);
   return {
     conversationId: id,
     workspaceId: "file:///ws",
     displayName: "WS",
     lastActiveMs,
-    dayKey: dayKeyLocal(lastActiveMs),
+    dayKey,
     estimatedTokens,
+    estimatedRequests,
+    estimatedRequestsByDay:
+      estimatedRequestsByDay ??
+      (estimatedRequests > 0 ? { [dayKey]: estimatedRequests } : {}),
+    estimatedTokensByDay:
+      estimatedTokensByDay ??
+      (estimatedTokens > 0 ? { [dayKey]: estimatedTokens } : {}),
     title: `Chat ${id}`,
   };
 }
@@ -80,7 +93,7 @@ test("eventTokens sums all token buckets and tolerates strings", () => {
   assert.equal(snapshotFromEvents([ev, ev]).totalTokens, 200);
 });
 
-test("filterEventsToRange drops out-of-range and keeps undated events", () => {
+test("filterEventsToRange drops out-of-range and undated events", () => {
   const base = 1_700_000_000_000;
   const events: FilteredUsageEvent[] = [
     { timestamp: base - 1000 },
@@ -88,10 +101,7 @@ test("filterEventsToRange drops out-of-range and keeps undated events", () => {
     { timestamp: base + 1000 },
     {},
   ];
-  assert.deepEqual(filterEventsToRange(events, base - 500, base + 500), [
-    { timestamp: base },
-    {},
-  ]);
+  assert.deepEqual(filterEventsToRange(events, base - 500, base + 500), [{ timestamp: base }]);
 });
 
 test("buildPlanView converts fractional percents and prefers weekly sand", () => {
@@ -164,6 +174,27 @@ test("resolveCycleRange prefers weekly sand, then billing cycle, then 30d", () =
   const fallback = resolveCycleRange(undefined, null, null);
   assert.equal(fallback.rangeKind, "monthly");
   assert.ok(Date.now() - fallback.startMs <= 30 * 86400000 + 5000);
+});
+
+test("resolveCycleRange skips fresh weekly reset in favor of summary month", () => {
+  const freshSand = new Date(Date.now() - 30 * 60_000).toISOString(); // 30 min ago
+  const summaryStart = "2026-11-01T00:00:00.000Z";
+  // Unified APIs often mirror the weekly reset on period.billingCycleStart.
+  const periodWeekly = String(Date.parse(freshSand));
+  const range = resolveCycleRange(
+    { billingCycleStart: summaryStart },
+    { billingCycleStart: periodWeekly },
+    { currentPeriodStart: freshSand, isUnified: true }
+  );
+  assert.equal(range.rangeKind, "monthly");
+  assert.equal(range.startMs, Date.parse(summaryStart));
+});
+
+test("resolveCycleRange skips young period.billingCycleStart without summary", () => {
+  const fresh = new Date(Date.now() - 10 * 60_000).toISOString();
+  const range = resolveCycleRange(undefined, { billingCycleStart: fresh }, null);
+  assert.equal(range.rangeKind, "monthly");
+  assert.ok(Date.now() - range.startMs >= 29 * 86400000);
 });
 
 test("dailyFromEvents buckets API tokens and adds unmatched local estimates", () => {
@@ -300,6 +331,146 @@ test("buildDashboardData flags unified billing with no published events as unava
   // Same gap on a classic plan is ordinary lag, not structural unavailability.
   const classic = buildDashboardData({ ...base, sand: { usagePercent: 64 } });
   assert.equal(classic.trend?.apiEventsUnavailable, false);
+});
+
+test("intersectMsRanges returns overlap or null", () => {
+  assert.deepEqual(intersectMsRanges(0, 100, 50, 150), { startMs: 50, endMs: 100 });
+  assert.equal(intersectMsRanges(0, 10, 20, 30), null);
+});
+
+test("boundsFromUserAnalyticsPeriod parses period.startDate/endDate", () => {
+  const b = boundsFromUserAnalyticsPeriod({
+    period: {
+      startDate: "2026-01-01T00:00:00.000Z",
+      endDate: "2026-01-31T23:59:59.000Z",
+    },
+  });
+  assert.ok(b);
+  assert.equal(b!.startMs, Date.parse("2026-01-01T00:00:00.000Z"));
+  assert.equal(b!.endMs, Date.parse("2026-01-31T23:59:59.000Z"));
+  assert.equal(boundsFromUserAnalyticsPeriod(null), null);
+});
+
+test("mergeDailyWithAnalytics adds coding fields and codingActivity score", () => {
+  const dayMs = Date.parse("2026-06-10T00:00:00.000Z");
+  const key = dayKeyLocal(dayMs);
+  const daily = mergeDailyWithAnalytics(
+    [
+      {
+        date: key,
+        tokens: 0,
+        costCents: 0,
+        eventCount: 0,
+        localPendingConversations: 0,
+        localEstimatedTokens: 0,
+        localEstimatedRequests: 0,
+        matchedConversations: 0,
+      },
+    ],
+    [
+      {
+        date: dayMs,
+        agentRequests: 2,
+        linesAdded: 10,
+        linesDeleted: 3,
+        totalApplies: 1,
+        totalAccepts: 4,
+      },
+    ]
+  );
+  const p = daily.find((d) => d.date === key)!;
+  assert.equal(p.linesAdded, 10);
+  assert.equal(p.linesDeleted, 3);
+  assert.equal(p.totalApplies, 1);
+  assert.equal(p.totalAccepts, 4);
+  assert.equal(p.codingActivity, 18);
+});
+
+test("buildDashboardData clips Trend to analytics period when billing window is wider", () => {
+  const winStart = at(2026, 0, 1);
+  const winEnd = at(2026, 0, 31, 23);
+  const analytics = {
+    period: {
+      startDate: "2026-01-10T00:00:00.000Z",
+      endDate: "2026-01-20T23:59:59.000Z",
+    },
+    dailyMetrics: [
+      {
+        date: "2026-01-15T00:00:00.000Z",
+        agentRequests: 5,
+        linesAdded: 100,
+      },
+    ],
+  };
+  const data = buildDashboardData({
+    analytics,
+    rangeStartMs: winStart,
+    rangeEndMs: winEnd,
+    rangeKind: "monthly",
+    workspaces: [],
+    contextUsage: {
+      percentFull: 0,
+      usedTokens: 0,
+      windowTokens: 256000,
+      categories: [],
+      estimated: true,
+    },
+  });
+  assert.equal(data.trend?.analyticsPeriodApplied, true);
+  assert.ok(data.trend?.note?.includes("Trend aligned to Cursor analytics period"));
+  const day15 = new Date(2026, 0, 15);
+  assert.ok(data.daily.some((d) => d.date === dayKeyLocal(day15.getTime())));
+  assert.ok(!data.daily.some((d) => d.date === dayKeyLocal(at(2026, 0, 5))));
+});
+
+test("buildDashboardData expands Trend to analytics period after fresh weekly reset", () => {
+  const freshStart = Date.now() - 15 * 60_000;
+  const now = Date.now();
+  const analyticsStart = Date.parse("2026-10-07T22:15:00.000Z");
+  const analytics = {
+    period: {
+      startDate: String(analyticsStart),
+      endDate: String(now),
+    },
+    dailyMetrics: [
+      {
+        date: String(Date.UTC(2026, 10, 5)),
+        agentRequests: 105,
+        modelUsage: [{ name: "default", count: 68 }],
+      },
+      {
+        date: String(Date.UTC(2026, 10, 6)),
+        agentRequests: 1,
+        modelUsage: [{ name: "default", count: 1 }],
+      },
+    ],
+  };
+  const data = buildDashboardData({
+    analytics,
+    sand: { isUnified: true, usagePercent: 0 },
+    rangeStartMs: freshStart,
+    rangeEndMs: now,
+    rangeKind: "weekly",
+    workspaces: [],
+    contextUsage: {
+      percentFull: 0,
+      usedTokens: 0,
+      windowTokens: 256000,
+      categories: [],
+      estimated: true,
+    },
+  });
+  assert.equal(data.trend?.analyticsPeriodApplied, true);
+  assert.ok(data.daily.length > 1);
+  assert.ok(
+    data.models.some((m) => (m.analyticsRequests || 0) >= 60),
+    "analytics model history must survive a fresh weekly window"
+  );
+  const nov5 = dayKeyLocal(Date.UTC(2026, 10, 5));
+  assert.ok(
+    data.daily.some((d) => d.date === nov5 && d.apiRequests === 105),
+    "analytics days outside the tiny weekly window must appear on Trend"
+  );
 });
 
 test("analyticsDaysInRange and mergeDailyWithAnalytics overlay request counts", () => {
@@ -489,6 +660,110 @@ test("buildDashboardData prefers Requests metric when analytics is live on unifi
   assert.equal(data.trend?.preferRequestsMetric, true);
   assert.equal(data.trend?.analyticsRequests, 33);
   assert.ok((data.daily.find((d) => (d.apiRequests || 0) > 0)?.apiRequests || 0) >= 33);
+});
+
+test("dailyFromEvents buckets local turns and tokens by day maps", () => {
+  const start = at(2026, 10, 5, 0);
+  const end = at(2026, 10, 6, 23);
+  const daily = dailyFromEvents(
+    [],
+    start,
+    end,
+    [
+      localConv("c1", at(2026, 10, 6, 15), 900, 5, {
+        "2026-11-05": 2,
+        "2026-11-06": 3,
+      }, {
+        "2026-11-05": 300,
+        "2026-11-06": 600,
+      }),
+    ]
+  );
+  const d5 = daily.find((d) => d.date === "2026-11-05")!;
+  const d6 = daily.find((d) => d.date === "2026-11-06")!;
+  assert.equal(d5.localEstimatedRequests, 2);
+  assert.equal(d6.localEstimatedRequests, 3);
+  assert.equal(d5.localEstimatedTokens, 300);
+  assert.equal(d6.localEstimatedTokens, 600);
+});
+
+test("unified billing still hides spend when a stale peek falls inside a widened analytics span", () => {
+  const analyticsStart = Date.now() - 30 * 86400000;
+  const stalePeek = Date.now() - 14 * 86400000;
+  const data = buildDashboardData({
+    sand: { isUnified: true, usagePercent: 0 },
+    analytics: {
+      period: {
+        startDate: String(analyticsStart),
+        endDate: String(Date.now()),
+      },
+      dailyMetrics: [
+        {
+          date: String(Date.now() - 86400000),
+          agentRequests: 10,
+          modelUsage: [{ name: "default", count: 10 }],
+        },
+      ],
+    },
+    rangeStartMs: Date.now() - 30 * 60_000,
+    rangeEndMs: Date.now(),
+    rangeKind: "weekly",
+    latestKnownEventMs: stalePeek,
+    usageEventsFetchStrategy: "wide-30d",
+    workspaces: [],
+    contextUsage: {
+      percentFull: 0,
+      usedTokens: 0,
+      windowTokens: 256000,
+      categories: [],
+      estimated: true,
+    },
+  });
+  assert.equal(data.trend?.apiEventsUnavailable, true);
+  assert.equal(data.trend?.spendTrendUnavailable, true);
+  assert.equal(data.trend?.preferRequestsMetric, true);
+  // Stale peek is inside the analytics-aligned axis, so it is not "before window".
+  assert.equal(data.trend?.lastEventBeforeWindow, false);
+});
+
+test("buildDashboardData flags analytics lag and spend trend unavailable on unified billing", () => {
+  const start = Date.now() - 3 * 86400000;
+  const today = Date.now() - 60_000;
+  const data = buildDashboardData({
+    sand: { isUnified: true, usagePercent: 80 },
+    analytics: {
+      dailyMetrics: [
+        {
+          date: String(today - (today % 86400000)),
+          agentRequests: 1,
+          subscriptionIncludedReqs: 1,
+          modelUsage: [{ name: "default", count: 1 }],
+        },
+      ],
+    },
+    rangeStartMs: start,
+    rangeEndMs: Date.now(),
+    rangeKind: "weekly",
+    latestKnownEventMs: start - 600_000,
+    usageEventsFetchStrategy: "wide-30d",
+    localConversations: [
+      localConv("c1", today, 1000, 8),
+      localConv("c2", today, 800, 6),
+    ],
+    workspaces: [],
+    contextUsage: {
+      percentFull: 0,
+      usedTokens: 0,
+      windowTokens: 256000,
+      categories: [],
+      estimated: true,
+    },
+  });
+  assert.equal(data.trend?.apiEventsUnavailable, true);
+  assert.equal(data.trend?.spendTrendUnavailable, true);
+  assert.equal(data.trend?.analyticsLagging, true);
+  const day = data.daily.find((d) => d.localEstimatedRequests > 0)!;
+  assert.ok(day.localEstimatedRequests >= 14);
 });
 
 test("totalsFromModels sums rows", () => {

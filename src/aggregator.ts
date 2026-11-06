@@ -45,7 +45,11 @@ function num(v: unknown): number {
   return 0;
 }
 
-/** Keep only events whose timestamp falls in the dashboard window (inclusive). */
+/**
+ * Keep only events whose timestamp falls in the dashboard window (inclusive).
+ * Rows without a parseable timestamp are dropped — they cannot be placed on the
+ * Trend axis and would only distort totals.
+ */
 export function filterEventsToRange(
   events: FilteredUsageEvent[],
   startMs: number,
@@ -54,7 +58,7 @@ export function filterEventsToRange(
   return events.filter((ev) => {
     const ms = asDateMs(ev.timestamp);
     if (ms === undefined) {
-      return true;
+      return false;
     }
     return ms >= startMs && ms <= endMs;
   });
@@ -492,11 +496,56 @@ function emptyDailyPoint(date: string): DailyPoint {
     eventCount: 0,
     localPendingConversations: 0,
     localEstimatedTokens: 0,
+    localEstimatedRequests: 0,
     matchedConversations: 0,
     apiRequests: 0,
     includedRequests: 0,
     usageBasedRequests: 0,
+    codingActivity: 0,
   };
+}
+
+/** Intersection of two inclusive millisecond ranges; null if disjoint. */
+export function intersectMsRanges(
+  a0: number,
+  a1: number,
+  b0: number,
+  b1: number
+): { startMs: number; endMs: number } | null {
+  const startMs = Math.max(a0, b0);
+  const endMs = Math.min(a1, b1);
+  if (startMs > endMs) {
+    return null;
+  }
+  return { startMs, endMs };
+}
+
+/**
+ * Bounds from get-user-analytics `period` when Cursor sends startDate/endDate.
+ */
+export function boundsFromUserAnalyticsPeriod(
+  analytics: UserAnalyticsResponse | null | undefined
+): { startMs: number; endMs: number } | null {
+  const p = analytics?.period;
+  if (!p || typeof p !== "object") {
+    return null;
+  }
+  const raw = p as { startDate?: string | number; endDate?: string | number };
+  const startMs = asDateMs(raw.startDate);
+  const endMs = asDateMs(raw.endDate);
+  if (startMs === undefined || endMs === undefined) {
+    return null;
+  }
+  return { startMs, endMs };
+}
+
+function codingActivityScore(day: UserAnalyticsDay): number {
+  return (
+    num(day.linesAdded) +
+    num(day.linesDeleted) +
+    num(day.totalApplies) +
+    num(day.totalAccepts)
+  );
 }
 
 /**
@@ -548,6 +597,26 @@ export function mergeDailyWithAnalytics(
     point.apiRequests = num(day.agentRequests);
     point.includedRequests = num(day.subscriptionIncludedReqs);
     point.usageBasedRequests = num(day.usageBasedReqs);
+    const linesAdded = num(day.linesAdded);
+    const linesDeleted = num(day.linesDeleted);
+    const applies = num(day.totalApplies);
+    const accepts = num(day.totalAccepts);
+    if (linesAdded > 0) {
+      point.linesAdded = linesAdded;
+    }
+    if (linesDeleted > 0) {
+      point.linesDeleted = linesDeleted;
+    }
+    if (applies > 0) {
+      point.totalApplies = applies;
+    }
+    if (accepts > 0) {
+      point.totalAccepts = accepts;
+    }
+    const coding = codingActivityScore(day);
+    if (coding > 0) {
+      point.codingActivity = coding;
+    }
   }
   return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -697,26 +766,49 @@ export function dailyFromEvents(
 
   const pendingPerDay = new Map<
     string,
-    { ids: Set<string>; estimatedTokens: number }
+    { ids: Set<string>; estimatedTokens: number; estimatedRequests: number }
   >();
+  const ensurePending = (key: string) => {
+    let entry = pendingPerDay.get(key);
+    if (!entry) {
+      entry = { ids: new Set(), estimatedTokens: 0, estimatedRequests: 0 };
+      pendingPerDay.set(key, entry);
+    }
+    return entry;
+  };
+  const rangeDayKeys = new Set(eachLocalDayKeys(rangeStartMs, rangeEndMs));
+
   for (const local of localConversations) {
     if (matchedIds.has(local.conversationId)) {
       continue;
     }
-    if (local.lastActiveMs < rangeStartMs || local.lastActiveMs > rangeEndMs) {
-      continue;
+    const reqByDay =
+      local.estimatedRequestsByDay &&
+      Object.keys(local.estimatedRequestsByDay).length > 0
+        ? local.estimatedRequestsByDay
+        : { [local.dayKey]: local.estimatedRequests || 0 };
+    const tokByDay =
+      local.estimatedTokensByDay &&
+      Object.keys(local.estimatedTokensByDay).length > 0
+        ? local.estimatedTokensByDay
+        : { [local.dayKey]: local.estimatedTokens || 0 };
+
+    for (const [key, reqs] of Object.entries(reqByDay)) {
+      if (!rangeDayKeys.has(key)) {
+        continue;
+      }
+      const entry = ensurePending(key);
+      entry.ids.add(local.conversationId);
+      entry.estimatedRequests += Math.max(0, reqs || 0);
     }
-    const key = local.dayKey;
-    let entry = pendingPerDay.get(key);
-    if (!entry) {
-      entry = { ids: new Set(), estimatedTokens: 0 };
-      pendingPerDay.set(key, entry);
+    for (const [key, toks] of Object.entries(tokByDay)) {
+      if (!rangeDayKeys.has(key)) {
+        continue;
+      }
+      const entry = ensurePending(key);
+      entry.ids.add(local.conversationId);
+      entry.estimatedTokens += Math.max(0, toks || 0);
     }
-    if (entry.ids.has(local.conversationId)) {
-      continue;
-    }
-    entry.ids.add(local.conversationId);
-    entry.estimatedTokens += Math.max(0, local.estimatedTokens || 0);
   }
 
   for (const [key, entry] of pendingPerDay) {
@@ -727,6 +819,7 @@ export function dailyFromEvents(
     }
     point.localPendingConversations = entry.ids.size;
     point.localEstimatedTokens = entry.estimatedTokens;
+    point.localEstimatedRequests = entry.estimatedRequests;
   }
 
   return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -830,27 +923,69 @@ export function sessionsFromActivity(input: {
     row.costCents += cost;
   }
 
+  const rangeDayKeys = new Set(
+    eachLocalDayKeys(input.rangeStartMs, input.rangeEndMs)
+  );
   for (const local of input.localConversations) {
     if (matchedIds.has(local.conversationId)) {
       continue;
     }
-    if (
-      local.lastActiveMs < input.rangeStartMs ||
-      local.lastActiveMs > input.rangeEndMs
-    ) {
-      continue;
-    }
-    const bucket = ensure(local.dayKey, local.conversationId);
-    bucket.localPending = true;
-    bucket.tokens = Math.max(0, local.estimatedTokens || 0);
-    bucket.tokensEstimated = bucket.tokens > 0;
+    const reqByDay =
+      local.estimatedRequestsByDay &&
+      Object.keys(local.estimatedRequestsByDay).length > 0
+        ? local.estimatedRequestsByDay
+        : { [local.dayKey]: local.estimatedRequests || 0 };
+    const tokByDay =
+      local.estimatedTokensByDay &&
+      Object.keys(local.estimatedTokensByDay).length > 0
+        ? local.estimatedTokensByDay
+        : { [local.dayKey]: local.estimatedTokens || 0 };
     const label = modelByConversation.get(local.conversationId) ?? "Unknown";
-    bucket.models.set(label, {
-      modelIntent: label,
-      model: label,
-      tokens: bucket.tokens,
-      costCents: 0,
-    });
+    const dayKeys = new Set([
+      ...Object.keys(reqByDay),
+      ...Object.keys(tokByDay),
+    ]);
+    let any = false;
+    for (const dayKey of dayKeys) {
+      if (!rangeDayKeys.has(dayKey)) {
+        continue;
+      }
+      const reqs = Math.max(0, reqByDay[dayKey] || 0);
+      const toks = Math.max(0, tokByDay[dayKey] || 0);
+      if (reqs <= 0 && toks <= 0) {
+        continue;
+      }
+      any = true;
+      const bucket = ensure(dayKey, local.conversationId);
+      bucket.localPending = true;
+      bucket.requests = reqs;
+      bucket.tokens = toks;
+      bucket.tokensEstimated = toks > 0;
+      bucket.models.set(label, {
+        modelIntent: label,
+        model: label,
+        tokens: toks,
+        costCents: 0,
+      });
+    }
+    if (
+      !any &&
+      local.lastActiveMs >= input.rangeStartMs &&
+      local.lastActiveMs <= input.rangeEndMs &&
+      rangeDayKeys.has(local.dayKey)
+    ) {
+      const bucket = ensure(local.dayKey, local.conversationId);
+      bucket.localPending = true;
+      bucket.tokens = Math.max(0, local.estimatedTokens || 0);
+      bucket.tokensEstimated = bucket.tokens > 0;
+      bucket.requests = Math.max(0, local.estimatedRequests || 0);
+      bucket.models.set(label, {
+        modelIntent: label,
+        model: label,
+        tokens: bucket.tokens,
+        costCents: 0,
+      });
+    }
   }
 
   const sessions: DaySession[] = [];
@@ -918,6 +1053,10 @@ export function buildTrendMeta(input: {
   /** Unified SAND/Grok billing (sand.isUnified) — see TrendMeta.apiEventsUnavailable. */
   unifiedBilling?: boolean;
   analyticsDays?: UserAnalyticsDay[];
+  /** Trend chart aligned to get-user-analytics period ∩ billing window. */
+  analyticsPeriodApplied?: boolean;
+  analyticsPeriodStartMs?: number;
+  analyticsPeriodEndMs?: number;
 }): TrendMeta {
   const matchedIds = apiConversationIds(input.events);
   let lastEventMs: number | undefined;
@@ -950,15 +1089,16 @@ export function buildTrendMeta(input: {
   }
 
   // Unified Grok/SAND billing publishes the pool % (get-sand-usage-status /
-  // get-current-period-usage) but no per-chat rows on the legacy event
-  // endpoints — verified live: an unbounded filtered query returns only the
-  // events from before the current period started. Once the period is more
-  // than a day old with still zero in-window events, this is not lag.
+  // get-current-period-usage) but no per-chat token/cost rows on the legacy
+  // event endpoints. A widened analytics Trend axis can place a stale
+  // pre-window peek inside the chart span — do not treat that as live events.
+  const hasInWindowApiTokensOrSpend = input.daily.some(
+    (d) => (d.tokens || 0) > 0 || (d.costCents || 0) > 0
+  );
   const apiEventsUnavailable =
     input.unifiedBilling === true &&
-    lastEventBeforeWindow &&
     input.events.length === 0 &&
-    Date.now() - input.rangeStartMs > 24 * 3600_000;
+    !hasInWindowApiTokensOrSpend;
 
   const pendingConversations = pending.length;
   const matchedConversations = matchedIds.size;
@@ -1000,21 +1140,48 @@ export function buildTrendMeta(input: {
   );
   const analyticsAvailable =
     (input.analyticsDays?.length ?? 0) > 0 && analyticsRequests > 0;
+  const localEstimatedRequests = input.daily.reduce(
+    (s, d) => s + (d.localEstimatedRequests || 0),
+    0
+  );
+  // Cursor analytics often lags hours behind local chats on unified billing.
+  const analyticsLagging = input.daily.some((d) => {
+    const localReqs = d.localEstimatedRequests || 0;
+    const apiReqs = d.apiRequests || 0;
+    if (localReqs < 3) {
+      return false;
+    }
+    return localReqs >= Math.max(3, apiReqs * 3 + 2);
+  });
+  const spendTrendUnavailable = apiEventsUnavailable;
 
   if (apiEventsUnavailable) {
     parts.push(
       analyticsAvailable
-        ? "per-chat token events not published for unified billing — request counts sync from Cursor analytics; token figures are local estimates"
-        : "per-chat API events not published for unified billing — local estimates are primary"
+        ? "per-chat token events not published for unified billing — request counts sync from Cursor analytics; token figures are local day-bucketed estimates (~); spend trend unavailable"
+        : "per-chat API events not published for unified billing — local day-bucketed estimates (~) are primary; spend trend unavailable"
     );
   }
-  if (analyticsAvailable) {
+  if (analyticsLagging) {
+    parts.push(
+      `Cursor analytics lagging local activity (~${localEstimatedRequests} local turns vs ${analyticsRequests} published)`
+    );
+  } else if (analyticsAvailable) {
     parts.push(
       `${analyticsRequests} analytics request${analyticsRequests === 1 ? "" : "s"}`
     );
   }
   if (input.usageEventsFetchStrategy && input.usageEventsFetchStrategy !== "primary") {
     parts.push(`events loaded via ${input.usageEventsFetchStrategy}`);
+  }
+  if (
+    input.analyticsPeriodApplied &&
+    input.analyticsPeriodStartMs !== undefined &&
+    input.analyticsPeriodEndMs !== undefined
+  ) {
+    parts.push(
+      `Trend aligned to Cursor analytics period (${formatShortWhen(input.analyticsPeriodStartMs)}–${formatShortWhen(input.analyticsPeriodEndMs)})`
+    );
   }
   if (
     input.events.length === 0 &&
@@ -1042,9 +1209,14 @@ export function buildTrendMeta(input: {
     apiEventsUnavailable,
     analyticsAvailable,
     analyticsRequests: analyticsAvailable ? analyticsRequests : undefined,
+    analyticsLagging: analyticsLagging || undefined,
     preferRequestsMetric: apiEventsUnavailable && analyticsAvailable,
+    spendTrendUnavailable: spendTrendUnavailable || undefined,
     lastEventBeforeWindow,
     usageEventsFetchStrategy: input.usageEventsFetchStrategy,
+    analyticsPeriodApplied: input.analyticsPeriodApplied || undefined,
+    analyticsPeriodStartMs: input.analyticsPeriodStartMs,
+    analyticsPeriodEndMs: input.analyticsPeriodEndMs,
     note: parts.join(" · "),
   };
 }
@@ -1118,11 +1290,47 @@ export function buildDashboardData(input: {
   const events = input.filtered?.usageEventsDisplay ?? [];
   const localConversations = input.localConversations ?? [];
   const localModels = input.localModels ?? [];
+  const analyticsPeriodBounds = boundsFromUserAnalyticsPeriod(input.analytics);
+  let trendStartMs = input.rangeStartMs;
+  let trendEndMs = input.rangeEndMs;
+  let analyticsPeriodApplied = false;
+  let analyticsPeriodStartMs: number | undefined;
+  let analyticsPeriodEndMs: number | undefined;
+  if (analyticsPeriodBounds) {
+    const billingSpan = Math.max(0, input.rangeEndMs - input.rangeStartMs);
+    const analyticsSpan = Math.max(
+      0,
+      analyticsPeriodBounds.endMs - analyticsPeriodBounds.startMs
+    );
+    // After a weekly pool reset the billing window can be minutes old while
+    // get-user-analytics still covers ~30d. Prefer the wider analytics span so
+    // Trend/Models are not blanked; otherwise keep the intersection.
+    if (analyticsSpan > billingSpan) {
+      trendStartMs = analyticsPeriodBounds.startMs;
+      trendEndMs = Math.max(analyticsPeriodBounds.endMs, input.rangeEndMs);
+    } else {
+      const periodIntersection = intersectMsRanges(
+        input.rangeStartMs,
+        input.rangeEndMs,
+        analyticsPeriodBounds.startMs,
+        analyticsPeriodBounds.endMs
+      );
+      if (periodIntersection) {
+        trendStartMs = periodIntersection.startMs;
+        trendEndMs = periodIntersection.endMs;
+      }
+    }
+    analyticsPeriodApplied = true;
+    analyticsPeriodStartMs = analyticsPeriodBounds.startMs;
+    analyticsPeriodEndMs = analyticsPeriodBounds.endMs;
+  }
   const analyticsDays = analyticsDaysInRange(
     input.analytics,
-    input.rangeStartMs,
-    input.rangeEndMs
+    trendStartMs,
+    trendEndMs
   );
+  /** Trend chart + session drill-down only (plan totals still use full `events`). */
+  const chartEvents = filterEventsToRange(events, trendStartMs, trendEndMs);
   // Group by routed model so Auto sessions show what actually served each request.
   const apiModels =
     events.length > 0
@@ -1135,8 +1343,8 @@ export function buildDashboardData(input: {
     events,
     localConversations,
     localModels,
-    rangeStartMs: input.rangeStartMs,
-    rangeEndMs: input.rangeEndMs,
+    rangeStartMs: trendStartMs,
+    rangeEndMs: trendEndMs,
   });
   // Only trust aggregated totals when they cover the same window we display.
   // For weekly windows with lagging events, prefer summing the (possibly empty)
@@ -1166,19 +1374,19 @@ export function buildDashboardData(input: {
   );
   const daily = mergeDailyWithAnalytics(
     dailyFromEvents(
-      events,
-      input.rangeStartMs,
-      input.rangeEndMs,
+      chartEvents,
+      trendStartMs,
+      trendEndMs,
       localConversations
     ),
     analyticsDays
   );
   const sessions = sessionsFromActivity({
-    events,
+    events: chartEvents,
     localConversations,
     localModels,
-    rangeStartMs: input.rangeStartMs,
-    rangeEndMs: input.rangeEndMs,
+    rangeStartMs: trendStartMs,
+    rangeEndMs: trendEndMs,
   });
   const trend = buildTrendMeta({
     events,
@@ -1186,11 +1394,14 @@ export function buildDashboardData(input: {
     daily,
     rangeKind: input.rangeKind,
     includedPercentUsed: plan.includedPercentUsed,
-    rangeStartMs: input.rangeStartMs,
+    rangeStartMs: trendStartMs,
     latestKnownEventMs: input.latestKnownEventMs,
     usageEventsFetchStrategy: input.usageEventsFetchStrategy,
     unifiedBilling: input.sand?.isUnified === true,
     analyticsDays,
+    analyticsPeriodApplied,
+    analyticsPeriodStartMs,
+    analyticsPeriodEndMs,
   });
 
   return {
@@ -1209,8 +1420,12 @@ export function buildDashboardData(input: {
 }
 
 /**
- * Prefer the weekly sand/included window when that drives the plan ring,
- * so Trend/models match what "included %" is measuring.
+ * Choose the chart/fetch window for Trend, models, and sessions.
+ *
+ * Prefer a mature weekly sand window (what included % measures). Right after a
+ * pool reset that window is nearly empty — fall through to the monthly summary
+ * cycle (or period) so analytics history is not wiped from the dashboard.
+ * Plan % still comes from sand via buildPlanView regardless of this range.
  */
 export function resolveCycleRange(
   summary: UsageSummary | undefined,
@@ -1219,9 +1434,14 @@ export function resolveCycleRange(
   fallbackDays = 30
 ): { startMs: number; endMs: number; rangeKind: TrendRangeKind } {
   const endMs = Date.now();
+  /** Fresh weekly resets blank charts; require ~20h of history before using sand. */
+  const MIN_USEFUL_WEEKLY_MS = 20 * 3600_000;
 
   const weeklyStart = asDateMs(sand?.currentPeriodStart);
-  if (weeklyStart !== undefined) {
+  if (
+    weeklyStart !== undefined &&
+    endMs - weeklyStart >= MIN_USEFUL_WEEKLY_MS
+  ) {
     return {
       startMs: weeklyStart,
       // Always fetch through now; a stale nextReset must not clip today's events.
@@ -1230,15 +1450,30 @@ export function resolveCycleRange(
     };
   }
 
-  const startParsed =
-    asDateMs(summary?.billingCycleStart) ?? asDateMs(period?.billingCycleStart);
-  if (startParsed !== undefined) {
+  // Prefer usage-summary's calendar month. On unified billing,
+  // get-current-period-usage.billingCycleStart often mirrors the weekly sand
+  // reset and would recreate the empty window we just skipped.
+  const summaryStart = asDateMs(summary?.billingCycleStart);
+  if (summaryStart !== undefined) {
     return {
-      startMs: startParsed,
+      startMs: summaryStart,
       endMs,
       rangeKind: "monthly",
     };
   }
+
+  const periodStart = asDateMs(period?.billingCycleStart);
+  if (
+    periodStart !== undefined &&
+    endMs - periodStart >= MIN_USEFUL_WEEKLY_MS
+  ) {
+    return {
+      startMs: periodStart,
+      endMs,
+      rangeKind: "monthly",
+    };
+  }
+
   return {
     startMs: endMs - fallbackDays * 86400000,
     endMs,

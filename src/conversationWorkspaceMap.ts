@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from "url";
 import {
   NO_WORKSPACE_ID,
   NO_WORKSPACE_LABEL,
+  WORKSPACE_RENAMES,
+  canonicalDisplayName,
   normalizeWorkspaceId,
 } from "./workspaceLabels";
 
@@ -134,9 +136,12 @@ export function canonicalizeWorkspaceIdentity(match: {
       return remapped;
     }
     const base = fileUriBasename(workspaceId);
+    const displayName = canonicalDisplayName(
+      match.displayName || base || workspaceId
+    );
     return {
       workspaceId,
-      displayName: match.displayName || base || workspaceId,
+      displayName,
     };
   }
 
@@ -148,9 +153,17 @@ export function canonicalizeWorkspaceIdentity(match: {
     return fromName;
   }
 
+  // Display-name-only rows (or unresolved paths) still follow known renames.
+  const renamedOnly = resolveWorkspacesFolder(
+    canonicalDisplayName(match.displayName || workspaceId)
+  );
+  if (renamedOnly) {
+    return renamedOnly;
+  }
+
   return {
     workspaceId,
-    displayName: match.displayName || workspaceId,
+    displayName: canonicalDisplayName(match.displayName || workspaceId),
   };
 }
 
@@ -185,6 +198,11 @@ function resolveWorkspacesFolder(
     path.join(os.homedir(), "Dokumente", "Cursor Workspaces"),
     path.join(os.homedir(), "Documents", "Cursor Workspaces"),
   ];
+  // Prefer the post-rename folder name when the old basename no longer exists.
+  const renameKey = slugTail.trim().toLowerCase().replace(/_/g, "-");
+  const renamed = WORKSPACE_RENAMES[renameKey];
+  const needles = renamed ? [renamed, slugTail] : [slugTail];
+
   for (const root of roots) {
     if (!fs.existsSync(root)) {
       continue;
@@ -195,13 +213,16 @@ function resolveWorkspacesFolder(
     } catch {
       continue;
     }
-    const needle = slugTail.toLowerCase().replace(/_/g, "-");
-    for (const name of names) {
-      if (name.endsWith(".code-workspace")) {
-        continue;
-      }
-      const cand = name.toLowerCase().replace(/_/g, "-");
-      if (cand === needle) {
+    for (const candidate of needles) {
+      const needle = candidate.toLowerCase().replace(/_/g, "-");
+      for (const name of names) {
+        if (name.endsWith(".code-workspace")) {
+          continue;
+        }
+        const cand = name.toLowerCase().replace(/_/g, "-");
+        if (cand !== needle) {
+          continue;
+        }
         const fsPath = path.join(root, name);
         try {
           if (!fs.statSync(fsPath).isDirectory()) {

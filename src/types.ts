@@ -208,6 +208,11 @@ export interface DailyPoint {
    * (chars÷4). Not billed usage.
    */
   localEstimatedTokens: number;
+  /**
+   * Sum of local user-turn counts for pending chats on this day.
+   * Stand-in when Cursor analytics under-reports agentRequests.
+   */
+  localEstimatedRequests: number;
   /** Distinct API conversationIds with events on this day. */
   matchedConversations: number;
   /** Agent requests from get-user-analytics (live on unified billing). */
@@ -216,6 +221,15 @@ export interface DailyPoint {
   includedRequests?: number;
   /** Usage-based / on-demand requests from analytics. */
   usageBasedRequests?: number;
+  /** From get-user-analytics daily metrics (when Cursor fills them). */
+  linesAdded?: number;
+  linesDeleted?: number;
+  totalApplies?: number;
+  totalAccepts?: number;
+  /**
+   * Single series for Trend “Code”: sum of analytics lines±, applies, accepts when any > 0.
+   */
+  codingActivity?: number;
 }
 
 /**
@@ -277,10 +291,20 @@ export interface TrendMeta {
   /** Sum of analytics agentRequests in the chart window. */
   analyticsRequests?: number;
   /**
+   * True when local user-turn estimates clearly outpace Cursor analytics for
+   * recent days (common lag on unified billing).
+   */
+  analyticsLagging?: boolean;
+  /**
    * Prefer the Requests trend metric when token events are unavailable but
    * analytics request counts are live.
    */
   preferRequestsMetric?: boolean;
+  /**
+   * True when spend trend has no Cursor cost events — do not invent a daily
+   * spend series; prepaid cents in Plan remain the real money figure.
+   */
+  spendTrendUnavailable?: boolean;
   /** How filtered usage events were loaded when the primary window was empty. */
   usageEventsFetchStrategy?:
     | "primary"
@@ -288,6 +312,13 @@ export interface TrendMeta {
     | "wide-30d"
     | "unbounded"
     | "empty";
+  /**
+   * When get-user-analytics includes `period`, the Trend chart uses the
+   * intersection with the billing/weekly window so axes match Cursor's analytics range.
+   */
+  analyticsPeriodApplied?: boolean;
+  analyticsPeriodStartMs?: number;
+  analyticsPeriodEndMs?: number;
   note?: string;
 }
 

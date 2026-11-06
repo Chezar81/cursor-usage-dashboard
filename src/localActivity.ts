@@ -1,3 +1,4 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -14,6 +15,112 @@ const UUID_RE =
 const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 
+/** mtime+size key for transcript analysis cache (recomputed when file grows). */
+const TRANSCRIPT_CACHE_DIR = "cache/transcript-analysis";
+
+interface TranscriptAnalysisCacheFile {
+  mtimeMs: number;
+  size: number;
+  analysis: TranscriptAnalysis;
+}
+
+function transcriptCacheKey(transcriptFile: string): string {
+  return crypto.createHash("sha256").update(transcriptFile).digest("hex");
+}
+
+function readCachedTranscriptAnalysis(
+  cacheDir: string | undefined,
+  transcriptFile: string,
+  st: fs.Stats
+): TranscriptAnalysis | undefined {
+  if (!cacheDir?.trim()) {
+    return undefined;
+  }
+  const filePath = path.join(
+    cacheDir,
+    TRANSCRIPT_CACHE_DIR,
+    `${transcriptCacheKey(transcriptFile)}.json`
+  );
+  try {
+    if (!fs.existsSync(filePath)) {
+      return undefined;
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw) as TranscriptAnalysisCacheFile;
+    if (
+      parsed.mtimeMs !== st.mtimeMs ||
+      parsed.size !== st.size ||
+      !parsed.analysis
+    ) {
+      return undefined;
+    }
+    return parsed.analysis;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeCachedTranscriptAnalysis(
+  cacheDir: string | undefined,
+  transcriptFile: string,
+  st: fs.Stats,
+  analysis: TranscriptAnalysis
+): void {
+  if (!cacheDir?.trim()) {
+    return;
+  }
+  const dir = path.join(cacheDir, TRANSCRIPT_CACHE_DIR);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const finalPath = path.join(dir, `${transcriptCacheKey(transcriptFile)}.json`);
+    const tmp = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+    const body: TranscriptAnalysisCacheFile = {
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      analysis,
+    };
+    fs.writeFileSync(tmp, JSON.stringify(body), "utf8");
+    fs.renameSync(tmp, finalPath);
+  } catch {
+    // cache is best-effort
+  }
+}
+
+/**
+ * Same as `analyzeTranscript`, but reuses a disk cache keyed by absolute path,
+ * file mtime, and size when `cacheDir` is set (extension global storage).
+ */
+export function analyzeTranscriptWithOptionalCache(
+  transcriptFile: string | undefined,
+  fallbackDayKey: string | undefined,
+  cacheDir: string | undefined
+): TranscriptAnalysis {
+  if (!transcriptFile) {
+    return emptyTranscriptAnalysis();
+  }
+  try {
+    const st = fs.statSync(transcriptFile);
+    if (!st.isFile() || st.size <= 0) {
+      return emptyTranscriptAnalysis();
+    }
+    if (cacheDir?.trim()) {
+      const cached = readCachedTranscriptAnalysis(cacheDir, transcriptFile, st);
+      if (cached) {
+        return cached;
+      }
+    }
+    const fallback =
+      fallbackDayKey || dayKeyLocal(transcriptLastActiveMs(transcriptFile, st.mtimeMs));
+    const analysis = analyzeTranscriptInner(transcriptFile, fallback);
+    if (cacheDir?.trim()) {
+      writeCachedTranscriptAnalysis(cacheDir, transcriptFile, st, analysis);
+    }
+    return analysis;
+  } catch {
+    return emptyTranscriptAnalysis();
+  }
+}
+
 /** One local agent chat discovered under ~/.cursor/projects. */
 export interface LocalConversationActivity {
   conversationId: string;
@@ -28,6 +135,21 @@ export interface LocalConversationActivity {
    * Not billed usage — undercounts cache/tools/system context.
    */
   estimatedTokens: number;
+  /**
+   * User-turn count; stand-in for Cursor analytics agentRequests when that
+   * endpoint lags.
+   */
+  estimatedRequests: number;
+  /**
+   * User turns bucketed by local calendar day (from `<timestamp>` stamps,
+   * else the chat's last-active day).
+   */
+  estimatedRequestsByDay: Record<string, number>;
+  /**
+   * Transcript token estimate split across local days. Chars after a stamped
+   * user turn land on that turn's day; unstamped chats use last-active day.
+   */
+  estimatedTokensByDay: Record<string, number>;
   /** First user message, one line. Empty when the transcript has no user text. */
   title: string;
 }
@@ -45,6 +167,11 @@ export interface LocalActivityScan {
 export function scanLocalConversationActivity(opts?: {
   /** Only include chats with last activity on/after this instant. */
   sinceMs?: number;
+  /**
+   * Extension global storage dir — enables transcript analysis cache
+   * (skips re-reading unchanged jsonl when mtime+size match).
+   */
+  cacheDir?: string;
 }): LocalActivityScan {
   const conversations: LocalConversationActivity[] = [];
   const projectsRoot = path.join(os.homedir(), ".cursor", "projects");
@@ -98,13 +225,22 @@ export function scanLocalConversationActivity(opts?: {
       }
 
       seen.add(name);
+      const fallbackDay = dayKeyLocal(lastActiveMs);
+      const analysis = analyzeTranscriptWithOptionalCache(
+        transcriptFile,
+        fallbackDay,
+        opts?.cacheDir
+      );
       conversations.push({
         conversationId: name,
         workspaceId: identity.workspaceId,
         displayName: identity.displayName,
         lastActiveMs,
-        dayKey: dayKeyLocal(lastActiveMs),
-        estimatedTokens: estimateTranscriptTokens(transcriptFile),
+        dayKey: fallbackDay,
+        estimatedTokens: analysis.estimatedTokens,
+        estimatedRequests: analysis.estimatedRequests,
+        estimatedRequestsByDay: analysis.estimatedRequestsByDay,
+        estimatedTokensByDay: analysis.estimatedTokensByDay,
         title: transcriptTitle(transcriptFile),
       });
     }
@@ -152,22 +288,56 @@ function transcriptLastActiveMs(
   return best;
 }
 
+export interface TranscriptAnalysis {
+  estimatedTokens: number;
+  estimatedRequests: number;
+  estimatedRequestsByDay: Record<string, number>;
+  estimatedTokensByDay: Record<string, number>;
+}
+
+function emptyTranscriptAnalysis(): TranscriptAnalysis {
+  return {
+    estimatedTokens: 0,
+    estimatedRequests: 0,
+    estimatedRequestsByDay: {},
+    estimatedTokensByDay: {},
+  };
+}
+
 /**
- * Rough billed-token stand-in from transcript text (chars ÷ 4).
- * Streams the whole transcript (up to the safety cap): reading only the
- * head would shrink the estimate the longer a chat runs.
- * Returns 0 when the file is missing or unreadable.
+ * Rough billed-token stand-in from transcript text (chars ÷ 4), plus
+ * day-bucketed user-turn counts. Streams the whole transcript (up to the
+ * safety cap). Returns zeros when the file is missing or unreadable.
  */
-export function estimateTranscriptTokens(
-  transcriptFile: string | undefined
-): number {
+export function analyzeTranscript(
+  transcriptFile: string | undefined,
+  fallbackDayKey?: string
+): TranscriptAnalysis {
   if (!transcriptFile) {
-    return 0;
+    return emptyTranscriptAnalysis();
   }
   try {
     const st = fs.statSync(transcriptFile);
     if (!st.isFile() || st.size <= 0) {
-      return 0;
+      return emptyTranscriptAnalysis();
+    }
+    const fallback =
+      fallbackDayKey ||
+      dayKeyLocal(transcriptLastActiveMs(transcriptFile, st.mtimeMs));
+    return analyzeTranscriptInner(transcriptFile, fallback);
+  } catch {
+    return emptyTranscriptAnalysis();
+  }
+}
+
+function analyzeTranscriptInner(
+  transcriptFile: string,
+  fallback: string
+): TranscriptAnalysis {
+  try {
+    const st = fs.statSync(transcriptFile);
+    if (!st.isFile() || st.size <= 0) {
+      return emptyTranscriptAnalysis();
     }
     const fd = fs.openSync(transcriptFile, "r");
     try {
@@ -176,6 +346,34 @@ export function estimateTranscriptTokens(
       let leftover = Buffer.alloc(0);
       let read = 0;
       let chars = 0;
+      let userTurns = 0;
+      const reqByDay: Record<string, number> = {};
+      const charByDay: Record<string, number> = {};
+      let activeDay = fallback;
+      const absorb = (raw: string) => {
+        for (const line of raw.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+          try {
+            const parsed = JSON.parse(trimmed) as unknown;
+            const lineChars = countMessageChars(parsed);
+            chars += lineChars;
+            if (isUserTurnRecord(parsed)) {
+              const text = userTextFromRecord(parsed) ?? "";
+              const ms = parseTranscriptTimestamp(text);
+              activeDay = ms !== undefined ? dayKeyLocal(ms) : fallback;
+              reqByDay[activeDay] = (reqByDay[activeDay] || 0) + 1;
+              userTurns += 1;
+            }
+            charByDay[activeDay] = (charByDay[activeDay] || 0) + lineChars;
+          } catch {
+            chars += trimmed.length;
+            charByDay[activeDay] = (charByDay[activeDay] || 0) + trimmed.length;
+          }
+        }
+      };
       while (read < limit) {
         const n = fs.readSync(
           fd,
@@ -199,19 +397,60 @@ export function estimateTranscriptTokens(
           leftover = data;
           continue;
         }
-        chars += countJsonlChars(data.subarray(0, cut).toString("utf8"));
+        absorb(data.subarray(0, cut).toString("utf8"));
         leftover = Buffer.from(data.subarray(cut + 1));
       }
       if (leftover.length > 0) {
-        chars += countJsonlChars(leftover.toString("utf8"));
+        absorb(leftover.toString("utf8"));
       }
-      return chars > 0 ? Math.max(1, Math.round(chars / 4)) : 0;
+      const tokensByDay: Record<string, number> = {};
+      for (const [day, dayChars] of Object.entries(charByDay)) {
+        if (dayChars > 0) {
+          tokensByDay[day] = Math.max(1, Math.round(dayChars / 4));
+        }
+      }
+      return {
+        estimatedTokens: chars > 0 ? Math.max(1, Math.round(chars / 4)) : 0,
+        estimatedRequests: userTurns,
+        estimatedRequestsByDay: reqByDay,
+        estimatedTokensByDay: tokensByDay,
+      };
     } finally {
       fs.closeSync(fd);
     }
   } catch {
-    return 0;
+    return emptyTranscriptAnalysis();
   }
+}
+
+/** Token-only helper kept for tests and call sites that do not need requests. */
+export function estimateTranscriptTokens(
+  transcriptFile: string | undefined
+): number {
+  return analyzeTranscript(transcriptFile).estimatedTokens;
+}
+
+/**
+ * Parse a Cursor `<timestamp>…</timestamp>` stamp into epoch ms.
+ * Returns undefined when the stamp is missing or unparseable.
+ */
+export function parseTranscriptTimestamp(raw: string): number | undefined {
+  const tagged = raw.match(/<timestamp>\s*([^<]+?)\s*<\/timestamp>/i);
+  if (!tagged) {
+    return undefined;
+  }
+  let body = tagged[1].trim();
+  body = body.replace(/^[A-Za-z]+,\s*/, "");
+  body = body.replace(
+    /\(UTC([+-])(\d{1,2})(?::(\d{2}))?\)/i,
+    (_m, sign: string, hour: string, minute?: string) => {
+      const hh = String(Math.abs(parseInt(hour, 10))).padStart(2, "0");
+      const mm = minute ?? "00";
+      return `${sign}${hh}:${mm}`;
+    }
+  );
+  const ms = Date.parse(body);
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 /** How much of a transcript to scan for the opening user message. */
@@ -301,11 +540,34 @@ function userTextFromRecord(value: unknown): string | undefined {
     return undefined;
   }
   const obj = value as Record<string, unknown>;
-  if (obj.role !== "user") {
-    return undefined;
+  if (obj.role === "user") {
+    const text = textFromContent(obj.message ?? obj);
+    return text || undefined;
   }
-  const text = textFromContent(obj.message ?? obj);
-  return text || undefined;
+  const message = obj.message;
+  if (message && typeof message === "object") {
+    const nested = message as Record<string, unknown>;
+    if (nested.role === "user") {
+      const text = textFromContent(nested);
+      return text || undefined;
+    }
+  }
+  return undefined;
+}
+
+function isUserTurnRecord(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.role === "user") {
+    return true;
+  }
+  const message = obj.message;
+  if (message && typeof message === "object") {
+    return (message as Record<string, unknown>).role === "user";
+  }
+  return false;
 }
 
 function textFromContent(content: unknown): string {

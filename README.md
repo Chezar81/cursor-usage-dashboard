@@ -9,7 +9,7 @@ Personal usage dashboard (webview + status bar) for **your own** account:
 - Current plan / cycle usage (included pool %, prepaid credits, reset date)
 - Model breakdown (tokens + cost, or analytics request counts on unified Grok billing)
 - **Context Usage** from Cursor’s local composer tray (same source as the chat popup). While the dashboard is open and focused, this box re-reads locally about every 5s — no extra cursor.com traffic
-- Daily trend charts (tokens, requests, or spend). Click a day to list that day’s chats
+- Daily trend charts (**Requests** default, Tokens, **Code** from analytics when published; Spend stays hidden when Cursor does not publish per-chat costs). Period menu: **Full (from first use)** or a calendar month with activity. When `get-user-analytics` sends a `period`, Trend prefers that span (especially right after a weekly pool reset). Click a day to list that day’s chats
 - **Local-first** models / trend / workspaces: transcript estimates (`chars÷4`, prefixed `~`) appear immediately; billed API totals replace them when Cursor publishes matching `conversationId`s
 - **Estimated** per-workspace usage from local chats + open-folder tracking
 
@@ -90,6 +90,9 @@ Every successful refresh writes durable files under Cursor’s extension global 
 | `workspace-usage.json` | Workspace estimates + open-window tracking (closed windows older than 30 days dropped) |
 | `cache/raw-latest.json` | Slim raw payloads (event lists omitted; ≤512 KB) |
 | `cache/history/YYYY-MM-DD.json` | One recovery snapshot per day (≤14 days, ≤2 MB total) |
+| `cache/transcript-analysis/*.json` | Per-chat transcript scan cache (mtime+size); skipped when the jsonl is unchanged |
+
+Usage events without a parseable `timestamp` are **dropped** after fetch so they cannot inflate totals or the Trend chart.
 
 Writes are atomic (temp → rename). Auto-refresh cannot bloat disk: history overwrites the
 same day’s file, legacy per-refresh history files are deleted on maintenance, orphaned
