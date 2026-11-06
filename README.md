@@ -9,7 +9,7 @@ Personal usage dashboard (webview + status bar) for **your own** account:
 - Current plan / cycle usage (included pool %, prepaid credits, reset date)
 - Model breakdown (tokens + cost, or analytics request counts on unified Grok billing)
 - **Context Usage** from Cursor’s local composer tray (same source as the chat popup). While the dashboard is open and focused, this box re-reads locally about every 5s — no extra cursor.com traffic
-- Daily trend charts (**Requests** default, Tokens, **Code** from analytics when published; Spend stays hidden when Cursor does not publish per-chat costs). Period menu: **Full (from first use)** or a calendar month with activity. When `get-user-analytics` sends a `period`, Trend prefers that span (especially right after a weekly pool reset). Click a day to list that day’s chats
+- Daily trend charts (**Requests** default, Tokens, **Code** from analytics when published; Spend stays hidden when Cursor does not publish per-chat costs). Period menu: **All time** or a calendar month with activity. When `get-user-analytics` sends a `period`, Trend prefers that span (especially right after a weekly pool reset). Click a day to list that day’s chats
 - **Local-first** models / trend / workspaces: transcript estimates (`chars÷4`, prefixed `~`) appear immediately; billed API totals replace them when Cursor publishes matching `conversationId`s
 - **Estimated** per-workspace usage from local chats + open-folder tracking
 

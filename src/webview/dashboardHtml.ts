@@ -288,6 +288,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       gap: 12px;
       margin-bottom: 14px;
     }
+    /* Taller controls on the right — centering the row pushes the caps h2 down; pin to top. */
+    .section-head.section-head--trend {
+      align-items: flex-start;
+    }
     .trend-toggles {
       display: flex;
       flex-wrap: wrap;
@@ -816,7 +820,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
     <section>
       <div class="panel">
-        <div class="section-head">
+        <div class="section-head section-head--trend">
           <h2>Trend</h2>
           <div class="trend-toggles">
             <div class="seg trend-range-dd" id="trend-range-dd">
@@ -827,9 +831,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 aria-label="Trend period"
                 aria-haspopup="listbox"
                 aria-expanded="false"
-                title="Full from first use, or a single calendar month"
+                title="All time, or a single calendar month"
               >
-                <span class="trend-range-label" id="trend-range-label">Full (from first use)</span>
+                <span class="trend-range-label" id="trend-range-label">All time</span>
                 <span class="trend-range-caret" aria-hidden="true">▾</span>
               </button>
               <ul class="trend-range-menu" id="trend-range-menu" role="listbox" hidden></ul>
@@ -943,6 +947,15 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       menu.hidden = true;
       btn.setAttribute("aria-expanded", "false");
     }
+    function syncTrendRangeMenuSelection() {
+      const menu = document.getElementById("trend-range-menu");
+      if (!menu) return;
+      menu.querySelectorAll("button[data-range]").forEach((opt) => {
+        const sel = opt.getAttribute("data-range") === trendRange;
+        opt.classList.toggle("active", sel);
+        opt.setAttribute("aria-selected", sel ? "true" : "false");
+      });
+    }
     function openTrendRangeMenu() {
       const dd = document.getElementById("trend-range-dd");
       const btn = document.getElementById("trend-range-btn");
@@ -951,6 +964,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       dd.classList.add("open");
       menu.hidden = false;
       btn.setAttribute("aria-expanded", "true");
+      syncTrendRangeMenuSelection();
       const active = menu.querySelector("button.active");
       if (active && active.focus) active.focus();
     }
@@ -963,6 +977,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       trendRange = value;
       persistUiState();
       syncTrendRangeLabel();
+      syncTrendRangeMenuSelection();
       closeTrendRangeMenu();
       drawTrend();
       renderDaySessions();
@@ -1201,7 +1216,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     }
 
     function trendRangeLabelFor(value) {
-      if (value === "full") return "Full (from first use)";
+      if (value === "full") return "All time";
       return formatMonthLabel(value);
     }
     function syncTrendRangeLabel() {
@@ -1217,7 +1232,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         persistUiState();
       }
       const options = [
-        { value: "full", label: "Full (from first use)" },
+        { value: "full", label: "All time" },
         ...months.map((ym) => ({ value: ym, label: formatMonthLabel(ym) })),
       ];
       menu.innerHTML = options
@@ -1866,7 +1881,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         } else if (sliced.trimmed) {
           note.textContent =
             base +
-            " · Full from first use " +
+            " · All time " +
             fmtTrendDay(sliced.from) +
             "–" +
             fmtTrendDay(sliced.to) +
