@@ -2,8 +2,12 @@
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
   "description": "Unofficial personal Cursor usage dashboard (requires your Cursor sign-in): plan cycle, models, trends, and local estimates.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Chezar81/cursor-usage-dashboard.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

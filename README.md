@@ -47,7 +47,7 @@ npm install
 npm test
 npm run build
 npx vsce package --no-dependencies --allow-missing-repository
-cursor --install-extension ./cursor-usage-dashboard-0.2.4.vsix
+cursor --install-extension ./cursor-usage-dashboard-0.2.5.vsix
 ```
 
 Or press **F5** from this folder for an Extension Development Host.
