@@ -8,6 +8,7 @@ import {
   WORKSPACE_RENAMES,
   canonicalDisplayName,
   normalizeWorkspaceId,
+  stripWorkspaceWindowSuffix,
 } from "./workspaceLabels";
 
 export interface ConversationWorkspace {
@@ -130,6 +131,22 @@ export function canonicalizeWorkspaceIdentity(match: {
     );
   }
 
+  // Multi-root `.code-workspace` windows: prefer the Cursor Workspaces folder
+  // among roots so "Foo (Workspace)" collapses onto the primary project row.
+  if (workspaceId.startsWith("multi:")) {
+    const parts = workspaceId.slice("multi:".length).split("|");
+    for (const part of parts) {
+      const partId = normalizeWorkspaceId(part);
+      if (!partId.startsWith("file:")) {
+        continue;
+      }
+      const remapped = remapCursorWorkspacesFileUri(partId);
+      if (remapped) {
+        return remapped;
+      }
+    }
+  }
+
   if (workspaceId.startsWith("file:")) {
     const remapped = remapCursorWorkspacesFileUri(workspaceId);
     if (remapped) {
@@ -145,25 +162,24 @@ export function canonicalizeWorkspaceIdentity(match: {
     };
   }
 
+  const label = match.displayName || workspaceId;
   const fromName =
     match.displayName && match.displayName !== workspaceId
-      ? resolveWorkspacesFolder(match.displayName)
+      ? resolveWorkspacesFolder(label)
       : undefined;
   if (fromName) {
     return fromName;
   }
 
   // Display-name-only rows (or unresolved paths) still follow known renames.
-  const renamedOnly = resolveWorkspacesFolder(
-    canonicalDisplayName(match.displayName || workspaceId)
-  );
+  const renamedOnly = resolveWorkspacesFolder(canonicalDisplayName(label));
   if (renamedOnly) {
     return renamedOnly;
   }
 
   return {
     workspaceId,
-    displayName: canonicalDisplayName(match.displayName || workspaceId),
+    displayName: canonicalDisplayName(label),
   };
 }
 
@@ -198,10 +214,11 @@ function resolveWorkspacesFolder(
     path.join(os.homedir(), "Dokumente", "Cursor Workspaces"),
     path.join(os.homedir(), "Documents", "Cursor Workspaces"),
   ];
+  const baseName = stripWorkspaceWindowSuffix(slugTail);
   // Prefer the post-rename folder name when the old basename no longer exists.
-  const renameKey = slugTail.trim().toLowerCase().replace(/_/g, "-");
+  const renameKey = baseName.trim().toLowerCase().replace(/_/g, "-");
   const renamed = WORKSPACE_RENAMES[renameKey];
-  const needles = renamed ? [renamed, slugTail] : [slugTail];
+  const needles = renamed ? [renamed, baseName] : [baseName];
 
   for (const root of roots) {
     if (!fs.existsSync(root)) {

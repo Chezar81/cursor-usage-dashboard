@@ -400,7 +400,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       position: relative;
       width: 148px;
       height: 148px;
-      justify-self: start;
+      justify-self: center;
     }
     .ring-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
     .ring-track {
@@ -454,11 +454,33 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       border: 1px solid transparent;
       min-height: 74px;
     }
+    .stat-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
     .stat-label {
       font-size: 0.68rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--muted);
+    }
+    .stat-action {
+      flex-shrink: 0;
+      margin-top: -2px;
+      padding: 3px 8px;
+      font-size: 0.68rem;
+      letter-spacing: 0.02em;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--border-strong);
+      line-height: 1.3;
+    }
+    .stat-action:hover {
+      background: var(--surface);
+      border-color: color-mix(in srgb, var(--fg) 32%, transparent);
     }
     .stat-value {
       margin-top: 4px;
@@ -929,6 +951,14 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     });
     document.getElementById("btn-context-report").addEventListener("click", () => {
       vscode.postMessage({ type: "viewContextReport" });
+    });
+    document.getElementById("plan-stats").addEventListener("click", (event) => {
+      const btn =
+        event.target && event.target.closest
+          ? event.target.closest("#btn-buy-credits")
+          : null;
+      if (!btn) return;
+      vscode.postMessage({ type: "buyCredits" });
     });
     document.querySelectorAll("[data-metric]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -1476,7 +1506,10 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           ? '<div class="stat-sub">' + escapeHtml(p.displayMessage) + "</div>"
           : "") +
         "</div>" +
-        '<div class="stat"><div class="stat-label">Account balance</div>' +
+        '<div class="stat"><div class="stat-head">' +
+        '<div class="stat-label">Account balance</div>' +
+        '<button type="button" class="stat-action" id="btn-buy-credits">buy credits</button>' +
+        "</div>" +
         '<div class="stat-value">' + onDemandText + "</div>" +
         '<div class="stat-sub">' + onDemandSub + "</div>" +
         creditsSub +
@@ -1493,9 +1526,17 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     }
 
     /**
-     * One row per model label: API/analytics wins, local estimates fold in.
+     * One row per model label: remote layers win as base, local folds in.
      * Guards against a stale extension host still sending duplicate rows.
      */
+    function modelEffectiveRequests(m) {
+      return Math.max(
+        m.localEstimatedRequests || 0,
+        m.analyticsRequests || 0,
+        (m.autoRequests || 0) + (m.manualRequests || 0)
+      );
+    }
+
     function dedupeModels(list) {
       const byLabel = new Map();
       for (const row of list || []) {
@@ -1521,14 +1562,30 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             ? 0
             : Math.max(apiFirst.totalTokens || 0, other.totalTokens || 0)
         );
+        const localReqs = Math.max(
+          apiFirst.localEstimatedRequests || 0,
+          other.localEstimatedRequests || 0
+        );
+        const analyticsReqs = Math.max(
+          apiFirst.analyticsRequests || 0,
+          other.analyticsRequests || 0
+        );
         byLabel.set(label, {
           ...apiFirst,
           model: label,
           modelIntent: label,
-          localPending: false,
-          analyticsRequests:
-            Math.max(apiFirst.analyticsRequests || 0, other.analyticsRequests || 0) ||
-            undefined,
+          localPending: apiHasBilled
+            ? false
+            : localReqs > analyticsReqs ||
+              (analyticsReqs === 0 &&
+                (localReqs > 0 ||
+                  Math.max(
+                    apiFirst.pendingConversations || 0,
+                    other.pendingConversations || 0
+                  ) > 0 ||
+                  est > 0)),
+          analyticsRequests: analyticsReqs || undefined,
+          localEstimatedRequests: localReqs || undefined,
           autoRequests:
             Math.max(apiFirst.autoRequests || 0, other.autoRequests || 0) ||
             undefined,
@@ -1546,7 +1603,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       }
       return [...byLabel.values()].sort(
         (a, b) =>
-          (b.analyticsRequests || 0) - (a.analyticsRequests || 0) ||
+          modelEffectiveRequests(b) - modelEffectiveRequests(a) ||
           (b.totalTokens || 0) - (a.totalTokens || 0) ||
           String(a.model).localeCompare(String(b.model))
       );
@@ -1559,7 +1616,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       const totals = data.totals || {};
       const apiRows = models.filter((m) => !m.localPending);
       const pendingRows = models.filter((m) => m.localPending);
-      const pendingChats = allModels
+      const pendingChats = allModels.reduce(
+        (s, m) => s + (m.pendingConversations || 0),
+        0
+      );
+      const localLedChats = allModels
         .filter((m) => m.localPending)
         .reduce((s, m) => s + (m.pendingConversations || 0), 0);
 
@@ -1573,11 +1634,15 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         (s, m) => s + (m.analyticsRequests || 0),
         0
       );
+      const localReqTotal = allModels.reduce(
+        (s, m) => s + (m.localEstimatedRequests || 0),
+        0
+      );
       const subParts = [];
       if (allModels.length > models.length) {
         subParts.push(allModels.length + " in this period");
       } else if (apiRows.length) {
-        subParts.push(apiRows.length + " API");
+        subParts.push(apiRows.length + " synced");
       }
       if (analyticsReqTotal > 0) {
         subParts.push(
@@ -1586,12 +1651,22 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             (analyticsReqTotal === 1 ? "" : "s")
         );
       }
+      if (localReqTotal > 0) {
+        subParts.push(
+          "~" +
+            localReqTotal +
+            " local req" +
+            (localReqTotal === 1 ? "" : "s")
+        );
+      }
       if (pendingChats > 0) {
         subParts.push(
           pendingChats +
             " local chat" +
             (pendingChats === 1 ? "" : "s") +
-            ((data.trend && data.trend.apiEventsUnavailable) ? " (local ~)" : " pending")
+            (localLedChats > 0
+              ? ((data.trend && data.trend.apiEventsUnavailable) ? " (local ~)" : " pending")
+              : "")
         );
       }
       const autoReqTotal = apiRows.reduce((s, m) => s + (m.autoRequests || 0), 0);
@@ -1601,16 +1676,17 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         if (autoReqTotal > 0) {
           subParts.push(autoReqTotal + " Auto-routed req" + (autoReqTotal === 1 ? "" : "s"));
         }
+      } else if (localReqTotal > analyticsReqTotal) {
+        subParts.push("local estimates first — consolidating when analytics catches up");
       } else if (analyticsReqTotal > 0) {
-        subParts.push("request counts from Cursor analytics · tokens local (~)");
+        subParts.push("analytics + local consolidated · tokens local (~)");
       } else {
         subParts.push("local labels first — matched when API publishes events");
       }
       document.getElementById("models-sub").textContent = subParts.join(" · ");
 
       function requestsOf(m) {
-        if (analyticsReqTotal > 0) return m.analyticsRequests || 0;
-        return (m.autoRequests || 0) + (m.manualRequests || 0);
+        return modelEffectiveRequests(m);
       }
       const requestTotal = allModels.reduce((s, m) => s + requestsOf(m), 0);
       const shareByRequests = requestTotal > 0;
@@ -1666,11 +1742,15 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               const chats = m.pendingConversations || 0;
               const est = m.totalTokens || 0;
               const aReq = m.analyticsRequests || 0;
+              const lReq = m.localEstimatedRequests || 0;
               const req = requestsOf(m);
               const pct = shareByRequests
                 ? (req / requestTotal) * 100
                 : (est / maxTokens) * 100;
               const metaBits = [];
+              if (lReq > 0) {
+                metaBits.push("~" + lReq + " local req" + (lReq === 1 ? "" : "s"));
+              }
               if (aReq > 0) {
                 metaBits.push(aReq + " analytics req" + (aReq === 1 ? "" : "s"));
               }
@@ -1691,14 +1771,15 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 metaBits.join(" · ") +
                 "</div></div>" +
                 barMarkup(pct, pendingColor, req) +
-                '<div class="model-cost" title="Cost unavailable until billed API events arrive">' +
-                (aReq > 0 ? aReq + " req" : "—") +
+                '<div class="model-cost" title="Local estimate until Cursor analytics / billed events catch up">' +
+                (req > 0 ? "~" + req + " req" : "—") +
                 "</div>" +
                 "</div>"
               );
             }
 
             const aReq = m.analyticsRequests || 0;
+            const lReq = m.localEstimatedRequests || 0;
             const req = requestsOf(m);
             const pct = shareByRequests
               ? (req / requestTotal) * 100
@@ -1716,10 +1797,14 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 " · out " + fmtTokens(m.outputTokens) +
                 " · cache " + fmtTokens(m.cacheReadTokens) +
                 "</div>";
-            } else if (aReq > 0) {
-              const bits = [
-                aReq + " analytics request" + (aReq === 1 ? "" : "s"),
-              ];
+            } else if (aReq > 0 || lReq > 0) {
+              const bits = [];
+              if (aReq > 0) {
+                bits.push(aReq + " analytics request" + (aReq === 1 ? "" : "s"));
+              }
+              if (lReq > 0) {
+                bits.push("~" + lReq + " local req" + (lReq === 1 ? "" : "s"));
+              }
               if (m.pendingConversations > 0) {
                 bits.push(
                   m.pendingConversations +
@@ -1742,8 +1827,8 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               '<div class="model-cost">' +
               (hasBilledTokens
                 ? fmtCents(m.costCents)
-                : aReq > 0
-                  ? aReq + " req"
+                : req > 0
+                  ? req + " req"
                   : "—") +
               "</div>" +
               "</div>"

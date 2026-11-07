@@ -30,6 +30,20 @@ test("normalizeDisplayName collapses AnonBrowser rename onto MintShield", () => 
   assert.equal(normalizeDisplayName("Usage_Dashboard"), "usage-dashboard");
 });
 
+test("normalizeDisplayName collapses Portable-Local-Studio onto Bavaria_Paratus_AI", () => {
+  assert.equal(normalizeDisplayName("Portable-Local-Studio"), "bavaria-paratus-ai");
+  assert.equal(normalizeDisplayName("Bavaria_Paratus_AI"), "bavaria-paratus-ai");
+  assert.equal(normalizeDisplayName("portable_local_studio"), "bavaria-paratus-ai");
+  assert.equal(
+    normalizeDisplayName("Portable-Local-Studio (Workspace)"),
+    "bavaria-paratus-ai"
+  );
+  assert.equal(
+    normalizeDisplayName("Bavaria_Paratus_AI (Workspace)"),
+    "bavaria-paratus-ai"
+  );
+});
+
 test("analyzeTranscriptWithOptionalCache skips re-read when mtime+size match", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cud-tcache-"));
   const file = path.join(dir, "t.jsonl");
@@ -162,5 +176,49 @@ test("canonicalizeWorkspaceIdentity folds AnonBrowser into MintShield", () => {
     ).displayName,
     "MintShield"
   );
+});
+
+test("canonicalizeWorkspaceIdentity folds Portable-Local-Studio into Bavaria_Paratus_AI when present", () => {
+  const bavariaRoot = path.join(
+    os.homedir(),
+    "Dokumente",
+    "Cursor Workspaces",
+    "Bavaria_Paratus_AI"
+  );
+  if (!fs.existsSync(bavariaRoot)) {
+    // Folder rename happens in a separate migrate step; map still normalizes labels.
+    assert.equal(normalizeDisplayName("Portable-Local-Studio"), "bavaria-paratus-ai");
+    return;
+  }
+  const bavaria = canonicalizeWorkspaceIdentity({
+    workspaceId: "file:///home/chezar/Dokumente/Cursor%20Workspaces/Bavaria_Paratus_AI",
+    displayName: "Bavaria_Paratus_AI",
+  });
+  const portable = canonicalizeWorkspaceIdentity({
+    workspaceId: "file:///home/chezar/Dokumente/Cursor%20Workspaces/Portable-Local-Studio",
+    displayName: "Portable-Local-Studio",
+  });
+  assert.equal(portable.displayName, "Bavaria_Paratus_AI");
+  assert.equal(portable.workspaceId, bavaria.workspaceId);
+  assert.equal(
+    identityFromProjectSlug(
+      "home-chezar-Dokumente-Cursor-Workspaces-Portable-Local-Studio"
+    ).displayName,
+    "Bavaria_Paratus_AI"
+  );
+  const portableMulti = canonicalizeWorkspaceIdentity({
+    workspaceId:
+      "multi:file:///home/chezar/Dokumente/Cursor%20Workspaces/Portable-Local-Studio|file:///media/chezar/SD-Karte",
+    displayName: "Portable-Local-Studio (Workspace)",
+  });
+  assert.equal(portableMulti.workspaceId, bavaria.workspaceId);
+  assert.equal(portableMulti.displayName, "Bavaria_Paratus_AI");
+  const bavariaMulti = canonicalizeWorkspaceIdentity({
+    workspaceId:
+      "multi:file:///home/chezar/Dokumente/Cursor%20Workspaces/Bavaria_Paratus_AI|file:///home/chezar/Dropbox/Synchronisation/Obsidian/Obsidian%20Vault/Bavaria%20Paratus|file:///media/chezar/SD-Karte/Bavaria%20Paratus%20AI",
+    displayName: "Bavaria_Paratus_AI (Workspace)",
+  });
+  assert.equal(bavariaMulti.workspaceId, bavaria.workspaceId);
+  assert.equal(bavariaMulti.displayName, "Bavaria_Paratus_AI");
 });
 

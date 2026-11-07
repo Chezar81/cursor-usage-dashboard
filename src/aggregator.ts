@@ -305,10 +305,54 @@ function modelRowKey(modelIntent: string, model: string): string {
   return `${modelIntent}\0${model}`;
 }
 
+/** Billed token/cost rows beat estimates when deciding which side is primary. */
+function modelHasBilledUsage(m: ModelBreakdown): boolean {
+  return (
+    !m.tokensEstimated &&
+    (m.totalTokens > 0 ||
+      m.costCents > 0 ||
+      (m.inputTokens || 0) > 0 ||
+      (m.outputTokens || 0) > 0)
+  );
+}
+
 /**
- * API / analytics model rows are the ones shown. Local tracking enriches a
- * matching row (same display label) with transcript estimates; only labels
- * with no API/analytics row stay as separate “pending” provisional rows.
+ * Consolidated request signal across the three layers:
+ * local transcript turns, Cursor analytics, billed usage events.
+ */
+export function modelEffectiveRequests(m: ModelBreakdown): number {
+  return Math.max(
+    m.localEstimatedRequests ?? 0,
+    m.analyticsRequests ?? 0,
+    (m.autoRequests ?? 0) + (m.manualRequests ?? 0)
+  );
+}
+
+/**
+ * localPending when local is the freshest request signal (or the only one).
+ * Cleared once analytics catches up or billed events arrive.
+ */
+function applyModelFreshnessFlags(models: ModelBreakdown[]): ModelBreakdown[] {
+  return models.map((m) => {
+    if (modelHasBilledUsage(m)) {
+      return { ...m, localPending: false };
+    }
+    const local = m.localEstimatedRequests ?? 0;
+    const analytics = m.analyticsRequests ?? 0;
+    const localLed =
+      local > analytics ||
+      (analytics === 0 &&
+        (local > 0 ||
+          (m.pendingConversations ?? 0) > 0 ||
+          !!m.tokensEstimated));
+    return { ...m, localPending: localLed };
+  });
+}
+
+/**
+ * Fold local transcript activity into API/analytics model rows.
+ * Unmatched chats contribute request + token estimates; matching labels stay
+ * one row. Ranking freshness is decided later by applyModelFreshnessFlags.
  */
 export function mergeModelsWithLocal(input: {
   apiModels: ModelBreakdown[];
@@ -324,43 +368,66 @@ export function mergeModelsWithLocal(input: {
     modelByConversation.set(local.conversationId, local.model);
   }
 
-  const estimatedByConversation = new Map<string, number>();
-  for (const local of input.localConversations) {
-    estimatedByConversation.set(
-      local.conversationId,
-      Math.max(0, local.estimatedTokens || 0)
-    );
-  }
+  const rangeDayKeys = new Set(
+    eachLocalDayKeys(input.rangeStartMs, input.rangeEndMs)
+  );
 
   const pendingByLabel = new Map<
     string,
-    { ids: Set<string>; estimatedTokens: number }
+    { ids: Set<string>; estimatedTokens: number; estimatedRequests: number }
   >();
-  const addPending = (label: string, conversationId: string) => {
+  const ensurePending = (label: string) => {
     let entry = pendingByLabel.get(label);
     if (!entry) {
-      entry = { ids: new Set(), estimatedTokens: 0 };
+      entry = { ids: new Set(), estimatedTokens: 0, estimatedRequests: 0 };
       pendingByLabel.set(label, entry);
     }
-    if (entry.ids.has(conversationId)) {
-      return;
-    }
-    entry.ids.add(conversationId);
-    entry.estimatedTokens += estimatedByConversation.get(conversationId) ?? 0;
+    return entry;
   };
 
   for (const local of input.localConversations) {
     if (matchedIds.has(local.conversationId)) {
       continue;
     }
-    if (
-      local.lastActiveMs < input.rangeStartMs ||
-      local.lastActiveMs > input.rangeEndMs
-    ) {
-      continue;
+    const reqByDay =
+      local.estimatedRequestsByDay &&
+      Object.keys(local.estimatedRequestsByDay).length > 0
+        ? local.estimatedRequestsByDay
+        : { [local.dayKey]: local.estimatedRequests || 0 };
+    const tokByDay =
+      local.estimatedTokensByDay &&
+      Object.keys(local.estimatedTokensByDay).length > 0
+        ? local.estimatedTokensByDay
+        : { [local.dayKey]: local.estimatedTokens || 0 };
+
+    let reqs = 0;
+    let toks = 0;
+    for (const [key, n] of Object.entries(reqByDay)) {
+      if (rangeDayKeys.has(key)) {
+        reqs += Math.max(0, n || 0);
+      }
     }
+    for (const [key, n] of Object.entries(tokByDay)) {
+      if (rangeDayKeys.has(key)) {
+        toks += Math.max(0, n || 0);
+      }
+    }
+    if (reqs <= 0 && toks <= 0) {
+      if (
+        local.lastActiveMs < input.rangeStartMs ||
+        local.lastActiveMs > input.rangeEndMs
+      ) {
+        continue;
+      }
+      reqs = Math.max(0, local.estimatedRequests || 0);
+      toks = Math.max(0, local.estimatedTokens || 0);
+    }
+
     const raw = modelByConversation.get(local.conversationId) ?? "unknown";
-    addPending(formatLocalModelLabel(raw), local.conversationId);
+    const entry = ensurePending(formatLocalModelLabel(raw));
+    entry.ids.add(local.conversationId);
+    entry.estimatedRequests += reqs;
+    entry.estimatedTokens += toks;
   }
 
   // Also surface model hints from tracking for chats that produced code but
@@ -375,7 +442,8 @@ export function mergeModelsWithLocal(input: {
     ) {
       continue;
     }
-    addPending(formatLocalModelLabel(local.model), local.conversationId);
+    const entry = ensurePending(formatLocalModelLabel(local.model));
+    entry.ids.add(local.conversationId);
   }
 
   const apiRows = input.apiModels.map((m) => ({
@@ -383,6 +451,7 @@ export function mergeModelsWithLocal(input: {
     localPending: false as boolean | undefined,
     pendingConversations: m.pendingConversations,
     tokensEstimated: m.tokensEstimated,
+    localEstimatedRequests: m.localEstimatedRequests,
   }));
 
   const apiByLabel = new Map<string, ModelBreakdown>();
@@ -395,15 +464,19 @@ export function mergeModelsWithLocal(input: {
 
   const provisional: ModelBreakdown[] = [];
   for (const [label, entry] of pendingByLabel) {
+    if (
+      entry.ids.size === 0 &&
+      entry.estimatedRequests <= 0 &&
+      entry.estimatedTokens <= 0
+    ) {
+      continue;
+    }
     const existing = apiByLabel.get(label);
     if (existing) {
-      // One row: API/analytics primary, enriched with local transcript data.
+      // One row: remote layers primary fields, local fills requests/tokens.
       existing.pendingConversations = entry.ids.size;
-      const hasBilled =
-        existing.totalTokens > 0 ||
-        existing.costCents > 0 ||
-        (existing.inputTokens || 0) > 0 ||
-        (existing.outputTokens || 0) > 0;
+      existing.localEstimatedRequests = entry.estimatedRequests;
+      const hasBilled = modelHasBilledUsage(existing);
       if (!hasBilled && entry.estimatedTokens > 0) {
         existing.totalTokens = entry.estimatedTokens;
         existing.tokensEstimated = true;
@@ -422,21 +495,26 @@ export function mergeModelsWithLocal(input: {
       localPending: true,
       pendingConversations: entry.ids.size,
       tokensEstimated: entry.estimatedTokens > 0,
+      localEstimatedRequests: entry.estimatedRequests,
     });
   }
   provisional.sort(
     (a, b) =>
+      modelEffectiveRequests(b) - modelEffectiveRequests(a) ||
       b.totalTokens - a.totalTokens ||
       (b.pendingConversations ?? 0) - (a.pendingConversations ?? 0) ||
       a.modelIntent.localeCompare(b.modelIntent)
   );
 
-  return dedupeModelsByLabel([...apiRows, ...provisional]);
+  return applyModelFreshnessFlags(
+    dedupeModelsByLabel([...apiRows, ...provisional])
+  );
 }
 
 /**
- * One row per display label. API/analytics rows win; local estimates and
- * chat counts fold into them. Safety net so a label never appears twice.
+ * One row per display label. Remote (API/analytics) fields win as the base;
+ * local estimates and chat counts fold in. Safety net so a label never
+ * appears twice.
  */
 export function dedupeModelsByLabel(models: ModelBreakdown[]): ModelBreakdown[] {
   const byLabel = new Map<string, ModelBreakdown>();
@@ -453,12 +531,7 @@ export function dedupeModelsByLabel(models: ModelBreakdown[]): ModelBreakdown[] 
         ? prev
         : row;
     const other = apiFirst === row ? prev : row;
-    const apiHasBilled =
-      !apiFirst.tokensEstimated &&
-      (apiFirst.totalTokens > 0 ||
-        apiFirst.costCents > 0 ||
-        (apiFirst.inputTokens || 0) > 0 ||
-        (apiFirst.outputTokens || 0) > 0);
+    const apiHasBilled = modelHasBilledUsage(apiFirst);
     const estTokens = Math.max(
       apiFirst.tokensEstimated ? apiFirst.totalTokens : 0,
       other.tokensEstimated ? other.totalTokens : 0,
@@ -472,6 +545,11 @@ export function dedupeModelsByLabel(models: ModelBreakdown[]): ModelBreakdown[] 
       analyticsRequests:
         Math.max(apiFirst.analyticsRequests ?? 0, other.analyticsRequests ?? 0) ||
         undefined,
+      localEstimatedRequests:
+        Math.max(
+          apiFirst.localEstimatedRequests ?? 0,
+          other.localEstimatedRequests ?? 0
+        ) || undefined,
       autoRequests: Math.max(apiFirst.autoRequests ?? 0, other.autoRequests ?? 0) || undefined,
       manualRequests:
         Math.max(apiFirst.manualRequests ?? 0, other.manualRequests ?? 0) ||
@@ -673,9 +751,13 @@ export function modelsFromAnalytics(
 }
 
 /**
- * Prefer billed event/aggregated model rows when they have tokens or cost.
- * Otherwise use analytics request rows. Local estimates enrich a matching
- * label in place (never a second duplicate row).
+ * Three-layer model consolidation (freshest → authoritative):
+ * 1. Local transcript estimates (always available on this machine)
+ * 2. Cursor analytics request counts, folded onto matching labels
+ * 3. Billed usage-API events/aggregates when they publish tokens or cost
+ *
+ * Ranking uses billed cost/tokens when present; otherwise the max of local
+ * and analytics request counts so a lagging analytics feed cannot freeze Top 5.
  */
 export function mergeModelsWithAnalytics(input: {
   apiModels: ModelBreakdown[];
@@ -686,15 +768,43 @@ export function mergeModelsWithAnalytics(input: {
   rangeStartMs: number;
   rangeEndMs: number;
 }): ModelBreakdown[] {
-  const apiHasBilled = input.apiModels.some(
-    (m) => m.totalTokens > 0 || m.costCents > 0
-  );
-  const base = apiHasBilled
-    ? input.apiModels.map((m) => ({ ...m }))
-    : input.analyticsModels.map((m) => ({ ...m }));
+  const apiHasBilled = input.apiModels.some((m) => modelHasBilledUsage(m));
+
+  // Layer 2+3 base: billed rows when present, else analytics. Local (layer 1)
+  // always folds in via mergeModelsWithLocal — including when both remotes are empty.
+  const remoteByLabel = new Map<string, ModelBreakdown>();
+  for (const row of apiHasBilled ? input.apiModels : input.analyticsModels) {
+    const label = formatLocalModelLabel(row.model || row.modelIntent);
+    if (!remoteByLabel.has(label)) {
+      remoteByLabel.set(label, { ...row, model: label, modelIntent: label });
+    }
+  }
+
+  if (apiHasBilled) {
+    // Overlay analytics request counts without wiping billed token/cost fields.
+    for (const row of input.analyticsModels) {
+      const label = formatLocalModelLabel(row.model || row.modelIntent);
+      const existing = remoteByLabel.get(label);
+      if (existing) {
+        existing.analyticsRequests =
+          Math.max(
+            existing.analyticsRequests ?? 0,
+            row.analyticsRequests ?? 0
+          ) || undefined;
+        existing.autoRequests =
+          Math.max(existing.autoRequests ?? 0, row.autoRequests ?? 0) ||
+          undefined;
+        existing.manualRequests =
+          Math.max(existing.manualRequests ?? 0, row.manualRequests ?? 0) ||
+          undefined;
+      } else {
+        remoteByLabel.set(label, { ...row, model: label, modelIntent: label });
+      }
+    }
+  }
 
   const merged = mergeModelsWithLocal({
-    apiModels: base,
+    apiModels: [...remoteByLabel.values()],
     events: input.events,
     localConversations: input.localConversations,
     localModels: input.localModels,
@@ -702,14 +812,21 @@ export function mergeModelsWithAnalytics(input: {
     rangeEndMs: input.rangeEndMs,
   });
 
-  if (!apiHasBilled && input.analyticsModels.length > 0) {
-    merged.sort(
-      (a, b) =>
-        (b.analyticsRequests ?? 0) - (a.analyticsRequests ?? 0) ||
+  merged.sort((a, b) => {
+    if (apiHasBilled) {
+      return (
+        b.costCents - a.costCents ||
         b.totalTokens - a.totalTokens ||
+        modelEffectiveRequests(b) - modelEffectiveRequests(a) ||
         a.model.localeCompare(b.model)
+      );
+    }
+    return (
+      modelEffectiveRequests(b) - modelEffectiveRequests(a) ||
+      b.totalTokens - a.totalTokens ||
+      a.model.localeCompare(b.model)
     );
-  }
+  });
   return merged;
 }
 

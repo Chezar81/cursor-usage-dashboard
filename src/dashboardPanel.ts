@@ -53,6 +53,10 @@ export class DashboardPanel {
           void vscode.env.openExternal(
             vscode.Uri.parse("https://cursor.com/docs/agent/prompting")
           );
+        } else if (msg?.type === "buyCredits") {
+          void vscode.env.openExternal(
+            vscode.Uri.parse("https://grok.com/dashboard")
+          );
         }
       },
       null,

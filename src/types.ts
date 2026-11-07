@@ -192,6 +192,12 @@ export interface ModelBreakdown {
    * unified billing; not the same as billed token events).
    */
   analyticsRequests?: number;
+  /**
+   * Local transcript user-turn estimate for unmatched chats of this model
+   * (chars÷4 tokens live in totalTokens when tokensEstimated). Used to keep
+   * Top models fresh when Cursor analytics / billed events lag.
+   */
+  localEstimatedRequests?: number;
 }
 
 export interface DailyPoint {

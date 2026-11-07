@@ -15,6 +15,7 @@ import {
   mergeDailyWithAnalytics,
   mergeModelsWithAnalytics,
   mergeModelsWithLocal,
+  modelEffectiveRequests,
   modelsFromAnalytics,
   resolveCycleRange,
   resolvePrepaidCredits,
@@ -623,6 +624,131 @@ test("mergeModelsWithLocal folds local estimates into matching API rows", () => 
   assert.equal(merged[0].totalTokens, 300);
   assert.equal(merged[0].tokensEstimated, true);
   assert.equal(merged[0].pendingConversations, 2);
+});
+
+test("mergeModelsWithAnalytics prefers fresher local requests over stale analytics", () => {
+  const analyticsModels = modelsFromAnalytics([
+    {
+      date: String(Date.UTC(2026, 10, 1)),
+      modelUsage: [
+        { name: "default", count: 10 },
+        { name: "grok-4.7-high-fast", count: 40 },
+      ],
+    },
+  ]);
+  const start = at(2026, 9, 30);
+  const end = at(2026, 10, 5, 23);
+  const merged = mergeModelsWithAnalytics({
+    apiModels: [],
+    analyticsModels,
+    events: [],
+    localConversations: [
+      localConv("c1", at(2026, 10, 4), 800, 25),
+      localConv("c2", at(2026, 10, 4), 400, 15),
+    ],
+    localModels: [
+      { conversationId: "c1", model: "default", lastActiveMs: at(2026, 10, 4) },
+      {
+        conversationId: "c2",
+        model: "default",
+        lastActiveMs: at(2026, 10, 4),
+      },
+    ],
+    rangeStartMs: start,
+    rangeEndMs: end,
+  });
+  const auto = merged.find((m) => m.model === "Auto (Default)")!;
+  assert.equal(auto.analyticsRequests, 10);
+  assert.equal(auto.localEstimatedRequests, 40);
+  assert.equal(auto.localPending, true);
+  assert.equal(modelEffectiveRequests(auto), 40);
+  // Local-led Auto outranks stale analytics-heavy grok.
+  assert.equal(merged[0].model, "Auto (Default)");
+});
+
+test("mergeModelsWithAnalytics clears localPending once analytics catches up", () => {
+  const analyticsModels = modelsFromAnalytics([
+    {
+      date: String(Date.UTC(2026, 10, 2)),
+      modelUsage: [{ name: "default", count: 50 }],
+    },
+  ]);
+  const merged = mergeModelsWithAnalytics({
+    apiModels: [],
+    analyticsModels,
+    events: [],
+    localConversations: [localConv("c1", at(2026, 10, 2), 200, 12)],
+    localModels: [
+      { conversationId: "c1", model: "default", lastActiveMs: at(2026, 10, 2) },
+    ],
+    rangeStartMs: at(2026, 9, 30),
+    rangeEndMs: at(2026, 10, 5, 23),
+  });
+  assert.equal(merged[0].localPending, false);
+  assert.equal(merged[0].analyticsRequests, 50);
+  assert.equal(merged[0].localEstimatedRequests, 12);
+  assert.equal(modelEffectiveRequests(merged[0]), 50);
+});
+
+test("mergeModelsWithAnalytics consolidates billed API as third layer", () => {
+  const apiModels: ModelBreakdown[] = [
+    {
+      modelIntent: "grok-4.7",
+      model: "grok-4.7",
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 150,
+      costCents: 42,
+      autoRequests: 0,
+      manualRequests: 3,
+    },
+  ];
+  const analyticsModels = modelsFromAnalytics([
+    {
+      date: String(Date.UTC(2026, 10, 2)),
+      modelUsage: [
+        { name: "grok-4.7", count: 8 },
+        { name: "default", count: 20 },
+      ],
+    },
+  ]);
+  const merged = mergeModelsWithAnalytics({
+    apiModels,
+    analyticsModels,
+    events: [{ conversationId: "billed-1" }],
+    localConversations: [
+      localConv("local-only", at(2026, 10, 2), 300, 5),
+      localConv("billed-1", at(2026, 10, 2), 900, 9),
+    ],
+    localModels: [
+      {
+        conversationId: "local-only",
+        model: "default",
+        lastActiveMs: at(2026, 10, 2),
+      },
+      {
+        conversationId: "billed-1",
+        model: "grok-4.7",
+        lastActiveMs: at(2026, 10, 2),
+      },
+    ],
+    rangeStartMs: at(2026, 9, 30),
+    rangeEndMs: at(2026, 10, 5, 23),
+  });
+  const grok = merged.find((m) => m.model === "grok-4.7")!;
+  assert.equal(grok.costCents, 42);
+  assert.equal(grok.totalTokens, 150);
+  assert.equal(grok.tokensEstimated, undefined);
+  assert.equal(grok.localPending, false);
+  assert.equal(grok.analyticsRequests, 8);
+  // Matched billed chat is excluded from local pending estimates.
+  assert.equal(grok.localEstimatedRequests ?? 0, 0);
+  const auto = merged.find((m) => m.model === "Auto (Default)")!;
+  assert.equal(auto.analyticsRequests, 20);
+  assert.equal(auto.localEstimatedRequests, 5);
+  assert.equal(auto.localPending, false);
 });
 
 test("buildDashboardData prefers Requests metric when analytics is live on unified billing", () => {
