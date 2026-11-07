@@ -14,6 +14,7 @@ import type {
   AggregatedUsageEventsResponse,
   AuthMe,
   ContextUsageView,
+  DailyModels,
   DailyPoint,
   DashboardData,
   DaySession,
@@ -831,6 +832,73 @@ export function mergeModelsWithAnalytics(input: {
 }
 
 /**
+ * mergeModelsWithAnalytics per local calendar day, so the webview can rank
+ * Top models for a Trend month without a host round-trip. Billed rows come
+ * from that day's events only; chat matching still uses every event so a
+ * billed chat is never re-counted as a local estimate on another day.
+ */
+export function dailyModelsFromActivity(input: {
+  events: FilteredUsageEvent[];
+  analyticsDays: UserAnalyticsDay[];
+  localConversations: LocalConversationActivity[];
+  localModels: LocalModelActivity[];
+  rangeStartMs: number;
+  rangeEndMs: number;
+}): DailyModels[] {
+  const eventsByDay = new Map<string, FilteredUsageEvent[]>();
+  for (const ev of input.events) {
+    const ms = asDateMs(ev.timestamp);
+    if (ms === undefined) {
+      continue;
+    }
+    const key = dayKeyLocal(ms);
+    let list = eventsByDay.get(key);
+    if (!list) {
+      list = [];
+      eventsByDay.set(key, list);
+    }
+    list.push(ev);
+  }
+  const analyticsByDay = new Map<string, UserAnalyticsDay[]>();
+  for (const day of input.analyticsDays) {
+    const ms = asDateMs(day.date);
+    if (ms === undefined) {
+      continue;
+    }
+    const key = dayKeyLocal(ms);
+    let list = analyticsByDay.get(key);
+    if (!list) {
+      list = [];
+      analyticsByDay.set(key, list);
+    }
+    list.push(day);
+  }
+
+  const out: DailyModels[] = [];
+  for (const date of eachLocalDayKeys(input.rangeStartMs, input.rangeEndMs)) {
+    const [y, m, d] = date.split("-").map(Number);
+    const dayStart = Math.max(input.rangeStartMs, new Date(y, m - 1, d).getTime());
+    const dayEnd = Math.min(
+      input.rangeEndMs,
+      new Date(y, m - 1, d + 1).getTime() - 1
+    );
+    const models = mergeModelsWithAnalytics({
+      apiModels: modelsGroupedByRoutedModel(eventsByDay.get(date) ?? []),
+      analyticsModels: modelsFromAnalytics(analyticsByDay.get(date) ?? []),
+      events: input.events,
+      localConversations: input.localConversations,
+      localModels: input.localModels,
+      rangeStartMs: dayStart,
+      rangeEndMs: dayEnd,
+    });
+    if (models.length) {
+      out.push({ date, models });
+    }
+  }
+  return out;
+}
+
+/**
  * Build daily Trend points: API tokens are authoritative; local chats whose
  * conversationId is not yet in the API contribute pending counts plus a
  * rough transcript-based token estimate (chars÷4).
@@ -1463,6 +1531,14 @@ export function buildDashboardData(input: {
     rangeStartMs: trendStartMs,
     rangeEndMs: trendEndMs,
   });
+  const dailyModels = dailyModelsFromActivity({
+    events,
+    analyticsDays,
+    localConversations,
+    localModels,
+    rangeStartMs: trendStartMs,
+    rangeEndMs: trendEndMs,
+  });
   // Only trust aggregated totals when they cover the same window we display.
   // For weekly windows with lagging events, prefer summing the (possibly empty)
   // event/model rows rather than monthly aggregates. Provisional local rows
@@ -1525,6 +1601,7 @@ export function buildDashboardData(input: {
     fetchedAt: new Date().toISOString(),
     plan,
     models,
+    dailyModels,
     daily,
     sessions,
     trend,

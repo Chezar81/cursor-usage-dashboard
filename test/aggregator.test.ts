@@ -7,6 +7,7 @@ import {
   buildDashboardData,
   buildPlanView,
   dailyFromEvents,
+  dailyModelsFromActivity,
   eventCostCents,
   eventTokens,
   filterEventsToRange,
@@ -749,6 +750,92 @@ test("mergeModelsWithAnalytics consolidates billed API as third layer", () => {
   assert.equal(auto.analyticsRequests, 20);
   assert.equal(auto.localEstimatedRequests, 5);
   assert.equal(auto.localPending, false);
+});
+
+test("dailyModelsFromActivity scopes the three-layer merge to each local day", () => {
+  const analyticsDays = [
+    {
+      date: String(Date.UTC(2026, 9, 30)),
+      modelUsage: [{ name: "grok-4.7", count: 6 }],
+    },
+    {
+      date: String(Date.UTC(2026, 10, 2)),
+      modelUsage: [
+        { name: "grok-4.7", count: 8 },
+        { name: "default", count: 20 },
+      ],
+    },
+  ];
+  const events: FilteredUsageEvent[] = [
+    {
+      conversationId: "billed-1",
+      timestamp: String(at(2026, 10, 3)),
+      model: "grok-4.7",
+      modelIntent: "grok-4.7",
+      tokenUsage: { inputTokens: 100, outputTokens: 50 },
+      chargedCents: 42,
+    },
+  ];
+  const localConversations = [
+    localConv("local-only", at(2026, 10, 2), 300, 5),
+    localConv("billed-1", at(2026, 10, 3), 900, 9),
+  ];
+  const localModels = [
+    { conversationId: "local-only", model: "default", lastActiveMs: at(2026, 10, 2) },
+    { conversationId: "billed-1", model: "grok-4.7", lastActiveMs: at(2026, 10, 3) },
+  ];
+  const rangeStartMs = at(2026, 9, 29, 0);
+  const rangeEndMs = at(2026, 10, 5, 23);
+  const days = dailyModelsFromActivity({
+    events,
+    analyticsDays,
+    localConversations,
+    localModels,
+    rangeStartMs,
+    rangeEndMs,
+  });
+
+  assert.deepEqual(
+    days.map((d) => d.date),
+    ["2026-10-30", "2026-11-02", "2026-11-03"]
+  );
+  const oct = days[0].models;
+  assert.equal(oct.length, 1);
+  assert.equal(oct[0].model, "grok-4.7");
+  assert.equal(oct[0].analyticsRequests, 6);
+
+  const nov2 = days[1].models;
+  const auto = nov2.find((m) => m.model === "Auto (Default)")!;
+  assert.equal(auto.analyticsRequests, 20);
+  assert.equal(auto.localEstimatedRequests, 5);
+  assert.equal(nov2.find((m) => m.model === "grok-4.7")!.costCents, 0);
+
+  // Billed tokens land on the event's day; the matched chat adds no local estimate.
+  const nov3 = days[2].models;
+  assert.equal(nov3.length, 1);
+  assert.equal(nov3[0].costCents, 42);
+  assert.equal(nov3[0].totalTokens, 150);
+  assert.equal(nov3[0].localEstimatedRequests ?? 0, 0);
+
+  // Summing every day reproduces the full-window request signal per label.
+  const full = mergeModelsWithAnalytics({
+    apiModels: [],
+    analyticsModels: modelsFromAnalytics(analyticsDays),
+    events,
+    localConversations,
+    localModels,
+    rangeStartMs,
+    rangeEndMs,
+  });
+  for (const row of full) {
+    const summed = days.reduce(
+      (s, d) =>
+        s +
+        (d.models.find((m) => m.model === row.model)?.analyticsRequests ?? 0),
+      0
+    );
+    assert.equal(summed, row.analyticsRequests ?? 0, row.model);
+  }
 });
 
 test("buildDashboardData prefers Requests metric when analytics is live on unified billing", () => {

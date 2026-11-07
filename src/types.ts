@@ -408,10 +408,18 @@ export interface ContextUsageView {
   note?: string;
 }
 
+/** Top-models merge scoped to one local calendar day (Trend month filter). */
+export interface DailyModels {
+  date: string;
+  models: ModelBreakdown[];
+}
+
 export interface DashboardData {
   fetchedAt: string;
   plan: PlanView;
   models: ModelBreakdown[];
+  /** Days with model activity only; summed client-side per Trend month. */
+  dailyModels?: DailyModels[];
   daily: DailyPoint[];
   /** Agent chats per day, for the Trend drill-down. */
   sessions: DaySession[];

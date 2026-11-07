@@ -910,22 +910,22 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       <div class="panel">
         <div class="section-head">
           <h2>Top 5 models</h2>
-          <p class="section-sub" id="models-sub">Routed models · Auto vs manual</p>
         </div>
         <div id="models"></div>
+        <p class="section-sub" id="models-sub" style="margin-top:10px">Routed models · Auto vs manual</p>
       </div>
     </section>
 
     <section>
       <div class="panel">
         <div class="section-head">
-          <h2>Workspaces</h2>
-          <p class="section-sub">Estimated · local</p>
+          <h2>Top 10 workspaces</h2>
+          <p class="section-sub" id="workspaces-sub">Estimated · local</p>
         </div>
-        <p class="section-sub" style="margin:-6px 0 12px">
+        <div id="workspaces"></div>
+        <p class="section-sub" id="workspaces-note" style="margin-top:10px">
           Local chats appear immediately with a rough transcript token estimate (~); billed totals replace them when Cursor’s usage API lists matching conversation IDs (it publishes none for unified Grok billing).
         </p>
-        <div id="workspaces"></div>
       </div>
     </section>
   </div>
@@ -1024,6 +1024,8 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       syncTrendRangeLabel();
       syncTrendRangeMenuSelection();
       closeTrendRangeMenu();
+      renderModels();
+      renderWorkspaces();
       drawTrend();
       renderDaySessions();
     }
@@ -1624,11 +1626,97 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       );
     }
 
+    /**
+     * All time: data.models (full-window merge). A month: sum dailyModels over
+     * the days Trend shows. Billed tokens win over transcript estimates, as in
+     * dedupeModels. Hosts without dailyModels keep the full-window list.
+     */
+    function modelsForTrendRange() {
+      const sliced = sliceDailyForRange((data && data.daily) || []);
+      if (sliced.mode !== "month" || !Array.isArray(data.dailyModels)) {
+        return { models: data.models || [], month: null };
+      }
+      const inRange = new Set(sliced.days.map((d) => d.date));
+      const byLabel = new Map();
+      for (const day of data.dailyModels) {
+        if (!day || !inRange.has(day.date)) continue;
+        for (const row of day.models || []) {
+          const label = String(row.model || row.modelIntent || "unknown");
+          let acc = byLabel.get(label);
+          if (!acc) {
+            acc = {
+              model: label,
+              modelIntent: label,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              billedTokens: 0,
+              estTokens: 0,
+              costCents: 0,
+              analyticsRequests: 0,
+              localEstimatedRequests: 0,
+              autoRequests: 0,
+              manualRequests: 0,
+              pendingConversations: 0,
+            };
+            byLabel.set(label, acc);
+          }
+          acc.inputTokens += row.inputTokens || 0;
+          acc.outputTokens += row.outputTokens || 0;
+          acc.cacheReadTokens += row.cacheReadTokens || 0;
+          acc.cacheWriteTokens += row.cacheWriteTokens || 0;
+          if (row.tokensEstimated) acc.estTokens += row.totalTokens || 0;
+          else acc.billedTokens += row.totalTokens || 0;
+          acc.costCents += row.costCents || 0;
+          acc.analyticsRequests += row.analyticsRequests || 0;
+          acc.localEstimatedRequests += row.localEstimatedRequests || 0;
+          acc.autoRequests += row.autoRequests || 0;
+          acc.manualRequests += row.manualRequests || 0;
+          acc.pendingConversations += row.pendingConversations || 0;
+        }
+      }
+      const rows = [];
+      for (const acc of byLabel.values()) {
+        const billed = acc.billedTokens > 0 || acc.costCents > 0;
+        const totalTokens = billed ? acc.billedTokens : acc.estTokens;
+        const local = acc.localEstimatedRequests;
+        const analytics = acc.analyticsRequests;
+        rows.push({
+          model: acc.model,
+          modelIntent: acc.modelIntent,
+          inputTokens: acc.inputTokens,
+          outputTokens: acc.outputTokens,
+          cacheReadTokens: acc.cacheReadTokens,
+          cacheWriteTokens: acc.cacheWriteTokens,
+          totalTokens,
+          costCents: acc.costCents,
+          tokensEstimated: billed ? false : totalTokens > 0,
+          localPending: billed
+            ? false
+            : local > analytics ||
+              (analytics === 0 &&
+                (local > 0 || acc.pendingConversations > 0 || totalTokens > 0)),
+          analyticsRequests: analytics || undefined,
+          localEstimatedRequests: local || undefined,
+          autoRequests: acc.autoRequests || undefined,
+          manualRequests: acc.manualRequests || undefined,
+          pendingConversations: acc.pendingConversations || undefined,
+        });
+      }
+      return { models: rows, month: sliced.month };
+    }
+
     function renderModels() {
       const el = document.getElementById("models");
-      const allModels = dedupeModels(data.models || []);
+      const scoped = modelsForTrendRange();
+      const allModels = dedupeModels(scoped.models);
       const models = allModels.slice(0, 5);
       const totals = data.totals || {};
+      const costTotal = scoped.month
+        ? allModels.reduce((s, m) => s + (m.costCents || 0), 0)
+        : totals.costCents || 0;
+      const rangeLabel = scoped.month ? formatMonthLabel(scoped.month) : "All time";
       const apiRows = models.filter((m) => !m.localPending);
       const pendingRows = models.filter((m) => m.localPending);
       const pendingChats = allModels.reduce(
@@ -1640,7 +1728,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         .reduce((s, m) => s + (m.pendingConversations || 0), 0);
 
       if (!allModels.length) {
-        document.getElementById("models-sub").textContent = "";
+        document.getElementById("models-sub").textContent = rangeLabel;
         el.innerHTML = '<p class="empty">No model usage in this period yet.</p>';
         return;
       }
@@ -1653,7 +1741,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         (s, m) => s + (m.localEstimatedRequests || 0),
         0
       );
-      const subParts = [];
+      const subParts = [rangeLabel];
       if (allModels.length > models.length) {
         subParts.push(allModels.length + " in this period");
       } else if (apiRows.length) {
@@ -1685,8 +1773,8 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         );
       }
       const autoReqTotal = apiRows.reduce((s, m) => s + (m.autoRequests || 0), 0);
-      if (apiRows.length && (totals.costCents || 0) > 0) {
-        subParts.push(fmtCents(totals.costCents) + " total");
+      if (apiRows.length && costTotal > 0) {
+        subParts.push(fmtCents(costTotal) + " total");
         subParts.push("by model that served the request");
         if (autoReqTotal > 0) {
           subParts.push(autoReqTotal + " Auto-routed req" + (autoReqTotal === 1 ? "" : "s"));
@@ -2400,12 +2488,94 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         body;
     }
 
+    /**
+     * All time: data.workspaces (tracker totals for the loaded window).
+     * A month: sum Trend sessions for that month's visible days — only
+     * workspaces with activity in range appear.
+     */
+    function workspacesForTrendRange() {
+      const sliced = sliceDailyForRange((data && data.daily) || []);
+      if (sliced.mode !== "month") {
+        return { workspaces: data.workspaces || [], month: null };
+      }
+      const inRange = new Set(sliced.days.map((d) => d.date));
+      const byName = new Map();
+      for (const s of data.sessions || []) {
+        if (!s || !inRange.has(s.date)) continue;
+        const name = String(s.workspace || "").trim() || "—";
+        let acc = byName.get(name);
+        if (!acc) {
+          acc = {
+            displayName: name,
+            workspaceId: name,
+            billedTokens: 0,
+            estTokens: 0,
+            costCents: 0,
+            lastDay: s.date,
+            anyPending: false,
+            anyBilled: false,
+          };
+          byName.set(name, acc);
+        }
+        if (s.tokensEstimated) acc.estTokens += s.tokens || 0;
+        else {
+          acc.billedTokens += s.tokens || 0;
+          if ((s.tokens || 0) > 0 || (s.costCents || 0) > 0) acc.anyBilled = true;
+        }
+        acc.costCents += s.costCents || 0;
+        if (s.localPending) acc.anyPending = true;
+        if (String(s.date) > String(acc.lastDay)) acc.lastDay = s.date;
+      }
+      const rows = [];
+      for (const acc of byName.values()) {
+        const billed = acc.anyBilled || acc.costCents > 0;
+        const tokens = billed ? acc.billedTokens : acc.estTokens;
+        rows.push({
+          workspaceId: acc.workspaceId,
+          displayName: acc.displayName,
+          tokens,
+          costCents: acc.costCents,
+          lastActiveAt: acc.lastDay,
+          localPending: billed ? false : acc.anyPending,
+          tokensEstimated: billed ? false : tokens > 0,
+        });
+      }
+      rows.sort(
+        (a, b) =>
+          b.tokens - a.tokens ||
+          b.costCents - a.costCents ||
+          String(a.displayName).localeCompare(String(b.displayName))
+      );
+      return { workspaces: rows, month: sliced.month };
+    }
+
     function renderWorkspaces() {
       const el = document.getElementById("workspaces");
-      const list = data.workspaces || [];
+      const scoped = workspacesForTrendRange();
+      const all = (scoped.workspaces || []).slice().sort(
+        (a, b) =>
+          (Number(b.tokens) || 0) - (Number(a.tokens) || 0) ||
+          (Number(b.costCents) || 0) - (Number(a.costCents) || 0) ||
+          String(a.displayName || "").localeCompare(String(b.displayName || ""))
+      );
+      const list = all.slice(0, 10);
+      const sub = document.getElementById("workspaces-sub");
+      if (sub) {
+        const parts = [
+          scoped.month ? formatMonthLabel(scoped.month) : "All time",
+        ];
+        if (all.length > list.length) {
+          parts.push(all.length + " in this period");
+        }
+        parts.push("Estimated · local");
+        sub.textContent = parts.join(" · ");
+      }
       if (!list.length) {
-        el.innerHTML =
-          '<p class="empty">No workspace matches yet. Usage is mapped via local agent chats (conversation → project) and active-folder tracking — refresh after chats exist on this machine.</p>';
+        el.innerHTML = scoped.month
+          ? '<p class="empty">No workspace activity in ' +
+            escapeHtml(formatMonthLabel(scoped.month)) +
+            ".</p>"
+          : '<p class="empty">No workspace matches yet. Usage is mapped via local agent chats (conversation → project) and active-folder tracking — refresh after chats exist on this machine.</p>';
         return;
       }
       const sortValue = {
