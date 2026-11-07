@@ -764,6 +764,20 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
+    th[data-ws-sort] {
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    th[data-ws-sort]:hover { color: var(--fg); }
+    th[data-ws-sort].sorted { color: var(--fg); }
+    .sort-arrow {
+      display: inline-block;
+      margin-left: 4px;
+      font-size: 0.85em;
+      opacity: 0.35;
+    }
+    th[data-ws-sort].sorted .sort-arrow { opacity: 1; color: var(--accent); }
     .ws-name {
       font-weight: 600;
       letter-spacing: -0.01em;
@@ -932,6 +946,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         ? uiState.trendRange
         : "full";
     let selectedDay = null;
+    let wsSort = { key: null, dir: 1 };
     let trendHits = [];
     let prefs = { currency: "USD", eurPerUsd: 0.92, appearance: "system" };
     const RING_C = 2 * Math.PI * 54;
@@ -2393,9 +2408,40 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           '<p class="empty">No workspace matches yet. Usage is mapped via local agent chats (conversation → project) and active-folder tracking — refresh after chats exist on this machine.</p>';
         return;
       }
+      const sortValue = {
+        name: (w) => String(w.displayName || "").toLowerCase(),
+        tokens: (w) => Number(w.tokens) || 0,
+        cost: (w) => Number(w.costCents) || 0,
+        active: (w) => Date.parse(w.lastActiveAt) || 0,
+      };
+      const rows = list.slice();
+      if (wsSort.key && sortValue[wsSort.key]) {
+        const get = sortValue[wsSort.key];
+        rows.sort((a, b) => {
+          const va = get(a);
+          const vb = get(b);
+          const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+          return cmp * wsSort.dir;
+        });
+      }
+      const th = (key, label, cls) => {
+        const active = wsSort.key === key;
+        const arrow = active ? (wsSort.dir > 0 ? "&#9650;" : "&#9660;") : "&#8597;";
+        const aria = active ? (wsSort.dir > 0 ? "ascending" : "descending") : "none";
+        return (
+          "<th data-ws-sort='" + key + "' aria-sort='" + aria + "' class='" +
+          (cls || "") + (active ? " sorted" : "") + "' title='Sort by " + label + "'>" +
+          label + "<span class='sort-arrow'>" + arrow + "</span></th>"
+        );
+      };
       el.innerHTML =
-        "<table><thead><tr><th>Workspace</th><th class='num'>Tokens</th><th class='num'>Cost</th><th class='num'>Last active</th></tr></thead><tbody>" +
-        list
+        "<table><thead><tr>" +
+        th("name", "Workspace") +
+        th("tokens", "Tokens", "num") +
+        th("cost", "Cost", "num") +
+        th("active", "Last active", "num") +
+        "</tr></thead><tbody>" +
+        rows
           .map(
             (w) =>
               "<tr><td><span class='ws-name'>" +
@@ -2419,6 +2465,16 @@ export function getDashboardHtml(webview: vscode.Webview): string {
           .join("") +
         "</tbody></table>";
     }
+
+    document.getElementById("workspaces").addEventListener("click", (event) => {
+      const header = event.target.closest("th[data-ws-sort]");
+      if (!header) return;
+      const key = header.getAttribute("data-ws-sort");
+      if (wsSort.key !== key) wsSort = { key, dir: 1 };
+      else if (wsSort.dir > 0) wsSort = { key, dir: -1 };
+      else wsSort = { key: null, dir: 1 };
+      renderWorkspaces();
+    });
 
     document.getElementById("trend").addEventListener("click", (event) => {
       const day = dayAtClientX(event.clientX);
