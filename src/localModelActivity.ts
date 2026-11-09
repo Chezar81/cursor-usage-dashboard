@@ -481,8 +481,10 @@ function tryNodeComposerRows(
 /** Display label for local tracking models. */
 export function formatLocalModelLabel(raw: string): string {
   const t = raw.trim();
-  if (!t || t.toLowerCase() === "default") {
-    // Cursor stores Auto picker as "default"; exact routed model only appears in usage API.
+  const lower = t.toLowerCase();
+  // Billing items say "auto"; transcripts and analytics say "default".
+  // Both are the Auto router, not two models.
+  if (!t || lower === "default" || lower === "auto" || lower === "auto (default)") {
     return "Auto (Default)";
   }
   if (t.toLowerCase() === "unknown") {

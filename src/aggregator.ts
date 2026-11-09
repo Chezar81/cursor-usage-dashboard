@@ -18,6 +18,7 @@ import type {
   DailyPoint,
   DashboardData,
   DaySession,
+  BillingUsageItem,
   FilteredUsageEvent,
   FilteredUsageEventsResponse,
   ModelBreakdown,
@@ -115,6 +116,58 @@ export function eventCostCents(ev: FilteredUsageEvent): number {
   return 0;
 }
 
+function meterTokens(usage: BillingUsageItem["usage"], key: string): number {
+  const raw = usage?.[key];
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+/**
+ * Map grok.com usage-event rows onto the filtered-event shape the rest of the
+ * dashboard already aggregates. Costs stay in fractional cents so summing
+ * sub-cent `pricing.contracted` values does not drift.
+ */
+export function billingItemsToUsageEvents(
+  items: BillingUsageItem[]
+): FilteredUsageEvent[] {
+  const events: FilteredUsageEvent[] = [];
+  for (const item of items) {
+    const timestamp = item.eventTime;
+    if (!timestamp) {
+      continue;
+    }
+    const model = (item.displayExtras?.model || "").trim() || "unknown";
+    const contracted = item.pricing?.contracted;
+    const dollars =
+      typeof contracted === "number"
+        ? contracted
+        : typeof contracted === "string" && contracted.trim() !== ""
+          ? Number(contracted)
+          : 0;
+    const usage = item.usage;
+    events.push({
+      timestamp,
+      model,
+      modelIntent: model,
+      kind: (item.usageType || "").trim() || undefined,
+      chargedCents: Number.isFinite(dollars) ? dollars * 100 : 0,
+      tokenUsage: {
+        inputTokens: meterTokens(usage, "prompt-text-tokens"),
+        outputTokens: meterTokens(usage, "completion-text-tokens"),
+        cacheReadTokens: meterTokens(usage, "cached-prompt-text-tokens"),
+        cacheWriteTokens: meterTokens(usage, "cache-write-text-tokens"),
+      },
+    });
+  }
+  return events;
+}
+
 export function eventTokens(ev: FilteredUsageEvent): number {
   const t = ev.tokenUsage;
   if (!t) {
@@ -132,8 +185,9 @@ function normalizePercent(pct: number | undefined | null): number | null {
   if (pct == null || !Number.isFinite(pct)) {
     return null;
   }
-  // API returns 0–100 already (e.g. 8.69); keep as-is. Fractions ≤1 → ×100.
-  return pct > 0 && pct <= 1 ? pct * 100 : pct;
+  // Cursor sand/period fields are already 0–100, including sub-1% values
+  // (e.g. 0.89 → displayMessage "You've used 1%"). Do not treat ≤1 as a fraction.
+  return pct;
 }
 
 /** Parse Connect-RPC int64 that may arrive as number or string. */
@@ -1091,13 +1145,31 @@ export function sessionsFromActivity(input: {
     if (ms === undefined) {
       continue;
     }
-    const bucket = ensure(dayKeyLocal(ms), extractConversationId(ev) || "");
+    const names = resolveModelNames(ev);
+    const conversationId = extractConversationId(ev) || "";
+    // Billing items have no conversation id. Group them by model and
+    // included/on-demand so the day list shows real tokens and cost
+    // instead of one unlabeled pile.
+    const usageKind = (ev.kind || "").trim();
+    const bucketId =
+      conversationId || `billing:${usageKind}:${names.model}`;
+    const bucket = ensure(dayKeyLocal(ms), bucketId);
+    if (!conversationId) {
+      bucket.title =
+        usageKind === "on_demand"
+          ? "On-demand"
+          : usageKind === "included"
+            ? "Included"
+            : "Billing";
+      bucket.workspace = "Cursor billing";
+      bucket.localPending = false;
+      bucket.tokensEstimated = false;
+    }
     const tokens = eventTokens(ev);
     const cost = eventCostCents(ev);
     bucket.requests += 1;
     bucket.tokens += tokens;
     bucket.costCents += cost;
-    const names = resolveModelNames(ev);
     const mkey = modelRowKey(names.modelIntent, names.model);
     let row = bucket.models.get(mkey);
     if (!row) {
@@ -1179,8 +1251,12 @@ export function sessionsFromActivity(input: {
       continue;
     }
     const dominant = dominantSessionModel(bucket.models);
-    const model = dominant?.model || (bucket.localPending ? "Unknown" : "unknown");
-    const modelIntent = dominant?.modelIntent;
+    const model = formatLocalModelLabel(
+      dominant?.model || (bucket.localPending ? "Unknown" : "unknown")
+    );
+    const modelIntent = dominant?.modelIntent
+      ? formatLocalModelLabel(dominant.modelIntent)
+      : undefined;
     const modelCount = bucket.models.size;
     sessions.push({
       date: bucket.date,
@@ -1356,7 +1432,14 @@ export function buildTrendMeta(input: {
       `${analyticsRequests} analytics request${analyticsRequests === 1 ? "" : "s"}`
     );
   }
-  if (input.usageEventsFetchStrategy && input.usageEventsFetchStrategy !== "primary") {
+  if (input.usageEventsFetchStrategy === "billing-items") {
+    parts.push(
+      "model, tokens, and cost from Cursor billing items (included pool vs on-demand)"
+    );
+  } else if (
+    input.usageEventsFetchStrategy &&
+    input.usageEventsFetchStrategy !== "primary"
+  ) {
     parts.push(`events loaded via ${input.usageEventsFetchStrategy}`);
   }
   if (

@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { setAppearance, type DashboardAppearance } from "./appearance";
 import {
   asDateMs,
+  billingItemsToUsageEvents,
   buildDashboardData,
   filterEventsToRange,
   resolveCycleRange,
@@ -382,15 +383,18 @@ async function refresh(
     );
 
     // Local-first: scan transcripts + tracking DB so Models/Trend fill before API.
+    // Keep ~30d of local chats so workspace estimates survive a weekly pool
+    // reset and can fill folders billing items cannot map (no conversation id).
+    const localSinceMs = startMs - 30 * 86400000;
     const localScan = scanLocalConversationActivity({
-      sinceMs: startMs - 2 * 86400000,
+      sinceMs: localSinceMs,
       cacheDir: store.storageDir,
     });
     // AI code-tracking only lists chats that produced code hashes;
     // composerData (state.vscdb) carries the picker model for every chat.
     const localModels = mergeLocalModelActivity([
       scanLocalModelActivity({
-        sinceMs: startMs - 2 * 86400000,
+        sinceMs: localSinceMs,
         untilMs: endMs,
       }),
       scanComposerModelActivity(),
@@ -416,6 +420,7 @@ async function refresh(
       | "primary-seconds"
       | "wide-30d"
       | "unbounded"
+      | "billing-items"
       | "empty" = "empty";
     try {
       const loaded = await client.getAllFilteredUsageEventsWithFallback({
@@ -434,6 +439,34 @@ async function refresh(
 
     let events = filtered?.usageEventsDisplay ?? [];
     events = filterEventsToRange(events, startMs, endMs);
+    // Unified Grok billing leaves the legacy event endpoints empty. The usage
+    // page's billing-items feed still has model, token meters, and cost.
+    if (events.length === 0) {
+      try {
+        const items = await client.getAllBillingItems({
+          startDate: startMs,
+          endDate: endMs,
+        });
+        const billed = filterEventsToRange(
+          billingItemsToUsageEvents(items),
+          startMs,
+          endMs
+        );
+        if (billed.length > 0) {
+          events = billed;
+          filtered = {
+            usageEventsDisplay: events,
+            totalUsageEventsCount: events.length,
+          };
+          usageEventsFetchStrategy = "billing-items";
+          eventsAuthoritative = true;
+        }
+      } catch (e) {
+        if (e instanceof CursorAuthError) {
+          throw e;
+        }
+      }
+    }
     if (filtered) {
       filtered = {
         ...filtered,
@@ -483,7 +516,7 @@ async function refresh(
       totalTokens,
       costCents: data.totals.costCents,
       localConversations: localScan.conversations,
-      rangeStartMs: startMs,
+      rangeStartMs: localSinceMs,
       clearStaleBilled,
     });
     data.contextUsage = await estimateContextUsage(

@@ -88,6 +88,41 @@ export interface FilteredUsageEventsResponse {
   [key: string]: unknown;
 }
 
+/**
+ * One row from get `/api/dashboard/v2/query-billing-items` — the same feed as
+ * grok.com/dashboard/usage “Usage events” (model, token meters, contracted cost).
+ * Present on unified Grok billing when the legacy filtered-events endpoints are empty.
+ */
+export interface BillingUsageItem {
+  billingItemId?: string;
+  eventTime?: string;
+  product?: string;
+  chargeCategory?: string;
+  /** "included" (pool, contracted 0) or "on_demand" (prepaid / credits). */
+  usageType?: string;
+  usage?: Record<string, string | number>;
+  pricing?: {
+    currency?: string;
+    /** USD (or pricing.currency) as a decimal string. */
+    contracted?: string | number;
+  };
+  displayExtras?: {
+    model?: string;
+    displayLabel?: string;
+    userEmail?: string;
+  };
+  hasTokenMeters?: boolean;
+  totalTokens?: string | number;
+}
+
+export interface BillingItemsPage {
+  data?: BillingUsageItem[];
+  pagination?: {
+    hasMore?: boolean;
+    nextCursor?: string;
+  };
+}
+
 export interface PeriodUsage {
   billingCycleStart?: string | number;
   billingCycleEnd?: string | number;
@@ -317,6 +352,7 @@ export interface TrendMeta {
     | "primary-seconds"
     | "wide-30d"
     | "unbounded"
+    | "billing-items"
     | "empty";
   /**
    * When get-user-analytics includes `period`, the Trend chart uses the

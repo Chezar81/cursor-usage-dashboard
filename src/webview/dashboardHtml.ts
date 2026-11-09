@@ -924,7 +924,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         </div>
         <div id="workspaces"></div>
         <p class="section-sub" id="workspaces-note" style="margin-top:10px">
-          Local chats appear immediately with a rough transcript token estimate (~); billed totals replace them when Cursor’s usage API lists matching conversation IDs (it publishes none for unified Grok billing).
+          Local transcript estimates (~) stay when billing events cannot map a chat to a folder. Window-timed billing fills cost and wins on tokens only when higher; conversation-mapped API events still replace matching chats.
         </p>
       </div>
     </section>
@@ -2126,9 +2126,8 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         return d.tokens;
       });
       const localValues = daily.map((d) => {
-        if (metric === "tokens") {
-          return noApiTokens ? 0 : d.localEstimatedTokens || 0;
-        }
+        // Tokens and Code have one series. A dashed estimate on Tokens sits
+        // on the axis once billed totals are in the millions.
         if (metric === "requests") {
           return d.localEstimatedRequests || 0;
         }
@@ -2136,6 +2135,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       });
       const maxApi = Math.max(...apiValues, 0);
       const maxLocal = Math.max(...localValues, 0);
+      const hasLocalSeries = maxLocal > 0 && metric === "requests";
       const sharedScale =
         metric === "tokens" || metric === "requests";
       const apiMax = sharedScale
@@ -2175,9 +2175,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 : noApiTokens
                   ? "Local est. tokens (~)"
                   : "API tokens";
-          const showLocal =
-            metric === "requests" ||
-            (metric === "tokens" && !noApiTokens);
+          const showLocal = hasLocalSeries;
           const localLegend =
             metric === "tokens"
               ? "Local est. tokens (~)"
@@ -2278,11 +2276,13 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         fill: maxApi > 0,
         skipZeroDots: maxApi > 0,
       });
-      const localPts = drawSeries(localValues, yLocal, localColor, {
-        fill: maxLocal > 0,
-        dashed: maxApi > 0,
-        width: 2.35,
-      });
+      const localPts = hasLocalSeries
+        ? drawSeries(localValues, yLocal, localColor, {
+            fill: true,
+            dashed: maxApi > 0,
+            width: 2.35,
+          })
+        : [];
 
       // Point labels when few days (keeps 2-day weeks readable)
       if (n <= 5) {
@@ -2328,19 +2328,19 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               : fmtTokens(apiMax);
       ctx.fillText(apiTopLabel, pad.l - 8, pad.t);
       ctx.fillText("0", pad.l - 8, pad.t + plotH);
-      ctx.textAlign = "left";
-      ctx.fillStyle = localColor;
-      ctx.fillText(
-        metric === "tokens"
-          ? "~" + fmtTokens(localMax)
-          : metric === "requests"
-            ? "~" + String(Math.round(localMax)) + " req"
-            : String(localMax) + " chats",
-        pad.l + plotW + 8,
-        pad.t
-      );
-      ctx.fillStyle = muted;
-      ctx.fillText("0", pad.l + plotW + 8, pad.t + plotH);
+      if (hasLocalSeries) {
+        ctx.textAlign = "left";
+        ctx.fillStyle = localColor;
+        ctx.fillText(
+          metric === "tokens"
+            ? "~" + fmtTokens(localMax)
+            : "~" + String(Math.round(localMax)) + " req",
+          pad.l + plotW + 8,
+          pad.t
+        );
+        ctx.fillStyle = muted;
+        ctx.fillText("0", pad.l + plotW + 8, pad.t + plotH);
+      }
 
       // X labels — label every day when the window is short
       ctx.fillStyle = muted;
@@ -2529,15 +2529,18 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       const rows = [];
       for (const acc of byName.values()) {
         const billed = acc.anyBilled || acc.costCents > 0;
-        const tokens = billed ? acc.billedTokens : acc.estTokens;
+        // Same marriage as the host tracker: keep the larger token signal so a
+        // billing-only "Cursor billing" row does not zero out transcript folders.
+        const tokens = Math.max(acc.billedTokens || 0, acc.estTokens || 0);
+        const fromEstimate = !billed || (acc.estTokens || 0) > (acc.billedTokens || 0);
         rows.push({
           workspaceId: acc.workspaceId,
           displayName: acc.displayName,
           tokens,
           costCents: acc.costCents,
           lastActiveAt: acc.lastDay,
-          localPending: billed ? false : acc.anyPending,
-          tokensEstimated: billed ? false : tokens > 0,
+          localPending: fromEstimate && acc.anyPending,
+          tokensEstimated: fromEstimate && tokens > 0,
         });
       }
       rows.sort(
@@ -2567,7 +2570,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         if (all.length > list.length) {
           parts.push(all.length + " in this period");
         }
-        parts.push("Estimated · local");
+        const anyEst = list.some((w) => w.tokensEstimated);
+        const anyBilled = list.some((w) => !w.tokensEstimated && ((w.tokens || 0) > 0 || (w.costCents || 0) > 0));
+        if (anyEst && anyBilled) parts.push("Billing + local ~");
+        else if (anyEst) parts.push("Estimated · local");
+        else if (anyBilled) parts.push("From billing events");
         sub.textContent = parts.join(" · ");
       }
       if (!list.length) {

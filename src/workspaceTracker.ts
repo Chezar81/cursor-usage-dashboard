@@ -34,6 +34,57 @@ function sessionId(): string {
   return vscode.env.sessionId || "unknown-session";
 }
 
+/**
+ * Merge API-attributed workspace totals with unmatched local transcript estimates.
+ *
+ * - Conversation-mapped API events: unmatched locals add on top (matched chats
+ *   are already excluded from the estimate).
+ * - Window-only / billing items: take the larger token figure so a focused
+ *   folder does not wipe transcript-mapped projects that share no event ids.
+ * Costs always keep the API figure when one exists.
+ */
+export function combineWorkspaceTokenSources(input: {
+  apiTokens: number;
+  apiCostCents: number;
+  localEstimatedTokens: number;
+  apiAuthoritative: boolean;
+  conversationMapped: boolean;
+}): { tokens: number; costCents: number; tokensEstimated: boolean } {
+  const apiTokens = Math.max(0, input.apiTokens || 0);
+  const localTokens = Math.max(0, input.localEstimatedTokens || 0);
+  const apiCost = Math.max(0, input.apiCostCents || 0);
+
+  if (!input.apiAuthoritative || apiTokens <= 0) {
+    return {
+      tokens: Math.max(apiTokens, localTokens),
+      costCents: apiCost,
+      tokensEstimated: localTokens > 0 && localTokens >= apiTokens,
+    };
+  }
+
+  if (input.conversationMapped) {
+    return {
+      tokens: apiTokens + localTokens,
+      costCents: apiCost,
+      tokensEstimated: false,
+    };
+  }
+
+  if (localTokens > apiTokens) {
+    return {
+      tokens: localTokens,
+      costCents: apiCost,
+      tokensEstimated: true,
+    };
+  }
+
+  return {
+    tokens: apiTokens,
+    costCents: apiCost,
+    tokensEstimated: false,
+  };
+}
+
 export function currentWorkspaceIdentity(): {
   workspaceId: string;
   displayName: string;
@@ -141,6 +192,9 @@ export class WorkspaceUsageTracker {
     const nowIso = new Date().toISOString();
     const snap = snapshotFromEvents(events);
     const pendingFlags = new Map<string, boolean>();
+    // Billing items have no conversation id — window timing alone must not
+    // erase transcript→project estimates for other folders.
+    const conversationMapped = events.some((ev) => !!eventConversationId(ev));
 
     // Don't wipe existing estimates when the events API returns nothing.
     // A confirmed empty window still drops previous-cycle billed rows so
@@ -214,7 +268,8 @@ export class WorkspaceUsageTracker {
       pendingFlags,
       totalsOverride?.localConversations ?? [],
       apiConversationIds(events),
-      totalsOverride?.rangeStartMs
+      totalsOverride?.rangeStartMs,
+      conversationMapped
     );
 
     this.ensureOpenWorkspaces(data);
@@ -245,7 +300,8 @@ export class WorkspaceUsageTracker {
     pendingFlags: Map<string, boolean>,
     localConversations: LocalConversationActivity[],
     matchedIds: Set<string>,
-    rangeStartMs?: number
+    rangeStartMs?: number,
+    conversationMapped = false
   ): void {
     const estimateByWorkspace = new Map<
       string,
@@ -294,28 +350,25 @@ export class WorkspaceUsageTracker {
         continue;
       }
 
-      // API-attributed rows keep billed totals; estimates only fill/refresh
-      // rows that are still provisional.
-      if (existing.tokensEstimated === false) {
-        existing.displayName = est.displayName;
-        const prev = Date.parse(existing.lastActiveAt);
-        const next = Date.parse(activeAt);
-        if (!Number.isFinite(prev) || (Number.isFinite(next) && next >= prev)) {
-          existing.lastActiveAt = activeAt;
-        }
-        continue;
-      }
-
+      const combined = combineWorkspaceTokenSources({
+        apiTokens: existing.tokens,
+        apiCostCents: existing.costCents,
+        localEstimatedTokens: est.estimatedTokens,
+        apiAuthoritative: existing.tokensEstimated === false,
+        conversationMapped,
+      });
       existing.displayName = est.displayName;
-      existing.tokens = est.estimatedTokens;
-      existing.costCents = 0;
-      existing.tokensEstimated = true;
+      existing.tokens = combined.tokens;
+      existing.costCents = combined.costCents;
+      existing.tokensEstimated = combined.tokensEstimated;
       const prev = Date.parse(existing.lastActiveAt);
       const next = Date.parse(activeAt);
       if (!Number.isFinite(prev) || (Number.isFinite(next) && next >= prev)) {
         existing.lastActiveAt = activeAt;
       }
-      pendingFlags.set(workspaceId, true);
+      if (combined.tokensEstimated) {
+        pendingFlags.set(workspaceId, true);
+      }
     }
   }
 
@@ -638,13 +691,30 @@ export class WorkspaceUsageTracker {
     const fromEstimated = from.estimated;
 
     if (intoEstimated && !fromEstimated) {
-      into.tokens = from.tokens;
-      into.costCents = from.costCents;
-      into.localPending = false;
-      into.tokensEstimated = false;
+      const combined = combineWorkspaceTokenSources({
+        apiTokens: from.tokens,
+        apiCostCents: from.costCents,
+        localEstimatedTokens: into.tokens,
+        apiAuthoritative: true,
+        conversationMapped: false,
+      });
+      into.tokens = combined.tokens;
+      into.costCents = combined.costCents;
+      into.localPending = combined.tokensEstimated;
+      into.tokensEstimated = combined.tokensEstimated;
       into.fromAliasOnly = false;
     } else if (!intoEstimated && fromEstimated) {
-      // Keep attributed totals; estimates only fill empty rows.
+      const combined = combineWorkspaceTokenSources({
+        apiTokens: into.tokens,
+        apiCostCents: into.costCents,
+        localEstimatedTokens: from.tokens,
+        apiAuthoritative: true,
+        conversationMapped: false,
+      });
+      into.tokens = combined.tokens;
+      into.costCents = combined.costCents;
+      into.localPending = combined.tokensEstimated;
+      into.tokensEstimated = combined.tokensEstimated;
     } else if (intoEstimated && fromEstimated) {
       // Both provisional: keep the larger fresh estimate (do not double-count
       // alias + file:// copies of the same local chats).

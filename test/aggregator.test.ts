@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   analyticsDaysInRange,
   asDateMs,
+  billingItemsToUsageEvents,
   boundsFromUserAnalyticsPeriod,
   buildDashboardData,
   buildPlanView,
@@ -106,15 +107,25 @@ test("filterEventsToRange drops out-of-range and undated events", () => {
   assert.deepEqual(filterEventsToRange(events, base - 500, base + 500), [{ timestamp: base }]);
 });
 
-test("buildPlanView converts fractional percents and prefers weekly sand", () => {
+test("buildPlanView keeps sub-1% sand values and prefers weekly sand", () => {
+  // Live API returns 0–100 already; 0.89 means ~1%, not 89%.
   const monthly = buildPlanView(
     { planUsage: { totalPercentUsed: 0.25 } },
     { email: "a@b.c" },
     null,
     null
   );
-  assert.equal(monthly.includedPercentUsed, 25);
+  assert.equal(monthly.includedPercentUsed, 0.25);
   assert.equal(monthly.email, "a@b.c");
+
+  const subOne = buildPlanView(
+    { planUsage: { totalPercentUsed: 0 } },
+    undefined,
+    { usagePercent: 0.8884073672806068, cursorPlanName: "Premium" },
+    null
+  );
+  assert.equal(subOne.includedPercentUsed, 0.8884073672806068);
+  assert.equal(subOne.includedLabel, "Weekly included usage");
 
   const weekly = buildPlanView(
     { planUsage: { totalPercentUsed: 0 } },
@@ -333,6 +344,84 @@ test("buildDashboardData flags unified billing with no published events as unava
   // Same gap on a classic plan is ordinary lag, not structural unavailability.
   const classic = buildDashboardData({ ...base, sand: { usagePercent: 64 } });
   assert.equal(classic.trend?.apiEventsUnavailable, false);
+});
+
+test("billing items become billed model, token, and cost rows", () => {
+  const events = billingItemsToUsageEvents([
+    {
+      eventTime: new Date(at(2026, 10, 8, 15)).toISOString(),
+      usageType: "on_demand",
+      usage: {
+        "prompt-text-tokens": "1000",
+        "completion-text-tokens": "200",
+        "cached-prompt-text-tokens": "3000",
+        "cache-write-text-tokens": "40",
+      },
+      pricing: { currency: "USD", contracted: "0.0683232000" },
+      displayExtras: { model: "grok-4.7-high-fast" },
+    },
+    {
+      eventTime: new Date(at(2026, 10, 8, 16)).toISOString(),
+      usageType: "included",
+      usage: { "prompt-text-tokens": "10", "completion-text-tokens": "5" },
+      pricing: { contracted: "0" },
+      displayExtras: { model: "auto" },
+    },
+    { usageType: "included" },
+  ]);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].kind, "on_demand");
+  assert.equal(events[0].model, "grok-4.7-high-fast");
+  assert.ok(Math.abs((events[0].chargedCents ?? 0) - 6.83232) < 1e-6);
+  assert.equal(events[0].tokenUsage?.cacheReadTokens, 3000);
+  assert.equal(events[1].kind, "included");
+  assert.equal(events[1].chargedCents, 0);
+
+  const start = at(2026, 10, 6);
+  const end = at(2026, 10, 9, 23);
+  const data = buildDashboardData({
+    sand: { isUnified: true, usagePercent: 1 },
+    filtered: { usageEventsDisplay: events, totalUsageEventsCount: events.length },
+    rangeStartMs: start,
+    rangeEndMs: end,
+    rangeKind: "weekly",
+    usageEventsFetchStrategy: "billing-items",
+    localConversations: [localConv("conv-local", at(2026, 10, 8, 15), 9000, 3)],
+    workspaces: [],
+    contextUsage: {
+      percentFull: 0,
+      usedTokens: 0,
+      windowTokens: 256000,
+      categories: [],
+      estimated: true,
+    },
+  });
+  const grok = data.models.find((m) => m.model === "grok-4.7-high-fast");
+  assert.ok(grok);
+  assert.equal(grok!.tokensEstimated, undefined);
+  assert.equal(grok!.localPending, false);
+  assert.equal(grok!.inputTokens, 1000);
+  assert.equal(grok!.outputTokens, 200);
+  assert.equal(grok!.cacheReadTokens, 3000);
+  assert.equal(grok!.totalTokens, 4240);
+  assert.ok(Math.abs(grok!.costCents - 6.83232) < 1e-6);
+  const auto = data.models.find((m) => m.model === "Auto (Default)");
+  assert.equal(auto?.autoRequests, 1);
+  assert.equal(auto?.costCents, 0);
+  assert.equal(data.trend?.apiEventsUnavailable, false);
+  assert.equal(data.trend?.spendTrendUnavailable, undefined);
+  assert.match(data.trend?.note ?? "", /billing items/);
+  const day = data.daily.find((d) => d.tokens > 0);
+  assert.ok(day);
+  assert.ok((day!.costCents ?? 0) > 0);
+  const onDemand = data.sessions.find((s) => s.title === "On-demand");
+  assert.equal(onDemand?.model, "grok-4.7-high-fast");
+  assert.equal(onDemand?.workspace, "Cursor billing");
+  assert.equal(onDemand?.requests, 1);
+  assert.equal(onDemand?.tokens, 4240);
+  const included = data.sessions.find((s) => s.title === "Included");
+  assert.equal(included?.model, "Auto (Default)");
+  assert.equal(included?.costCents, 0);
 });
 
 test("intersectMsRanges returns overlap or null", () => {

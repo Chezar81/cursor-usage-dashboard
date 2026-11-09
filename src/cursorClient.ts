@@ -1,6 +1,8 @@
 import type {
   AggregatedUsageEventsResponse,
   AuthMe,
+  BillingItemsPage,
+  BillingUsageItem,
   FilteredUsageEvent,
   FilteredUsageEventsResponse,
   PeriodUsage,
@@ -262,6 +264,56 @@ export class CursorDashboardClient {
       }
       return null;
     }
+  }
+
+  /**
+   * Per-request model, token meters, and contracted cost.
+   * Same feed as grok.com/dashboard/usage. Works on unified Grok billing
+   * when get-filtered-usage-events returns nothing. Pages are newest-first;
+   * `pageSize` above 500 is rejected.
+   */
+  async getAllBillingItems(opts: {
+    startDate: number;
+    endDate: number;
+    pageSize?: number;
+    maxPages?: number;
+  }): Promise<BillingUsageItem[]> {
+    const pageSize = Math.min(500, Math.max(1, opts.pageSize ?? 500));
+    const maxPages = opts.maxPages ?? 24;
+    const all: BillingUsageItem[] = [];
+    let cursor: string | undefined;
+    const startTime = new Date(opts.startDate).toISOString();
+    const endTime = new Date(opts.endDate).toISOString();
+
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        const qs = new URLSearchParams({
+          scope: "user",
+          startTime,
+          endTime,
+          pageSize: String(pageSize),
+        });
+        if (cursor) {
+          qs.set("cursor", cursor);
+        }
+        const batch = await this.getJson<BillingItemsPage>(
+          `/api/dashboard/v2/query-billing-items?${qs.toString()}`
+        );
+        const rows = batch.data ?? [];
+        all.push(...rows);
+        const next = batch.pagination?.nextCursor;
+        if (!batch.pagination?.hasMore || !next || rows.length === 0) {
+          break;
+        }
+        cursor = next;
+      }
+    } catch (e) {
+      if (e instanceof CursorAuthError) {
+        throw e;
+      }
+      return all;
+    }
+    return all;
   }
 
   /**
