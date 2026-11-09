@@ -1134,12 +1134,21 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       if (n == null || !Number.isFinite(n) || n <= 0) return "—";
       return "~" + fmtTokens(n);
     }
-    /** Pill on local-only rows: 'Local' when the API structurally publishes
-        no per-chat events for this plan, else 'Pending API'. */
+    /**
+     * Pill on local-only rows. "Pending API" only when classic per-chat events
+     * might still catch up. Billing items have no conversation id, so those
+     * estimates stay local forever — same for fully unavailable event feeds.
+     */
+    function pendingIsStructuralLocal() {
+      const trend = data && data.trend;
+      return (
+        !!trend &&
+        (trend.apiEventsUnavailable ||
+          trend.usageEventsFetchStrategy === "billing-items")
+      );
+    }
     function pendingPillLabel() {
-      return data && data.trend && data.trend.apiEventsUnavailable
-        ? "Local"
-        : "Pending API";
+      return pendingIsStructuralLocal() ? "Local" : "Pending API";
     }
     /** Cursor amounts are USD cents; convert for display. */
     function fmtCents(c) {
@@ -1768,7 +1777,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             " local chat" +
             (pendingChats === 1 ? "" : "s") +
             (localLedChats > 0
-              ? ((data.trend && data.trend.apiEventsUnavailable) ? " (local ~)" : " pending")
+              ? (pendingIsStructuralLocal() ? " (local ~)" : " pending")
               : "")
         );
       }
@@ -1837,7 +1846,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               '<div class="model-name">' +
               escapeHtml(routed) +
               (m.localPending
-                ? "<span class='pending-pill' title='Local model from Cursor's local chat data; no billed API events for this chat'>" + pendingPillLabel() + "</span>"
+                ? "<span class='pending-pill' title='" +
+                  (pendingIsStructuralLocal()
+                    ? "Local model from transcripts / picker. Billing events have no conversation id, so this row will not be replaced by a per-chat API match."
+                    : "Local model from Cursor's local chat data; no billed API events for this chat yet.") +
+                  "'>" + pendingPillLabel() + "</span>"
                 : "") +
               "</div>";
 
@@ -2463,7 +2476,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               escapeHtml(title) +
               "</span>" +
               (s.localPending
-                ? "<span class='pending-pill' title='Local chat; no billed API events for this chat. Token figure is a rough transcript estimate (chars÷4).'>" + pendingPillLabel() + "</span>"
+                ? "<span class='pending-pill' title='" +
+                  (pendingIsStructuralLocal()
+                    ? "Local chat transcript estimate (chars÷4). Billing events have no conversation id, so this stays a local figure."
+                    : "Local chat; no billed API events for this chat yet. Token figure is a rough transcript estimate (chars÷4).") +
+                  "'>" + pendingPillLabel() + "</span>"
                 : "") +
               "</td><td><span class='session-sub' title='" + escapeHtml(s.workspace || "") + "'>" +
               escapeHtml(s.workspace || "—") +
@@ -2625,7 +2642,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
               escapeHtml(w.displayName) +
               "</span>" +
               (w.localPending
-                ? "<span class='pending-pill' title='Local chat; no billed API events for this chat. Token figure is a rough transcript estimate (chars÷4).'>" + pendingPillLabel() + "</span>"
+                ? "<span class='pending-pill' title='" +
+                  (pendingIsStructuralLocal()
+                    ? "Local transcript estimate (chars÷4). Billing items only attach to the folder that was focused at event time, so this project keeps its local figure."
+                    : "Local chat; no billed API events for this chat yet. Token figure is a rough transcript estimate (chars÷4).") +
+                  "'>" + pendingPillLabel() + "</span>"
                 : "") +
               "</td><td class='num' title='" +
               (w.tokensEstimated
