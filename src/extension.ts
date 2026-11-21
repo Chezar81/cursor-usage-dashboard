@@ -5,6 +5,7 @@ import {
   billingItemsToUsageEvents,
   buildDashboardData,
   filterEventsToRange,
+  mergeDailyWithDailyMetrics,
   resolveCycleRange,
 } from "./aggregator";
 import { watchBundleReload } from "./bundleReload";
@@ -91,6 +92,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       ...cached,
       contextUsage: cached.contextUsage ?? emptyContextUsage(),
     };
+    await attachDurableDailyMetrics(lastData, { record: false });
     updateStatusBar(lastData);
   }
 
@@ -347,6 +349,7 @@ async function refresh(
       data.contextUsage = await estimateContextUsage(
         vscode.workspace.workspaceFolders
       );
+      await attachDurableDailyMetrics(data, { record: false });
       await publish(data, { skipCache: true });
       if (!opts?.silent) {
         vscode.window.showWarningMessage(data.error!);
@@ -523,6 +526,7 @@ async function refresh(
       vscode.workspace.workspaceFolders
     );
 
+    await attachDurableDailyMetrics(data, { record: true });
     await publish(data);
     // Best-effort raw payload backup (view model is already cached in publish).
     void store
@@ -562,6 +566,7 @@ async function refresh(
       error: message,
       authError,
     };
+    await attachDurableDailyMetrics(data, { record: false });
     await publish(data, { skipCache: true });
     if (!opts?.silent) {
       vscode.window.showErrorMessage(message);
@@ -569,6 +574,42 @@ async function refresh(
   } finally {
     refreshing = false;
   }
+}
+
+/**
+ * Merge durable local Trend metrics (Usage %, Tokens, Spend deltas) into
+ * `data.daily`. When `record` is true, upsert today’s sample first.
+ */
+async function attachDurableDailyMetrics(
+  data: DashboardData,
+  opts: { record: boolean }
+): Promise<void> {
+  const day = (data.fetchedAt || new Date().toISOString()).slice(0, 10);
+  let series;
+  if (opts.record && /^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    const today = (data.daily ?? []).find((d) => d.date === day);
+    const pct = data.plan?.includedPercentUsed;
+    const spend = data.plan?.onDemandUsedCents;
+    series = await store.recordDailyMetrics({
+      day,
+      fetchedAt: data.fetchedAt,
+      cycleStart: data.plan?.cycleStart,
+      cycleEnd: data.plan?.cycleEnd,
+      includedPercentUsed:
+        typeof pct === "number" && Number.isFinite(pct) ? pct : undefined,
+      localTokens:
+        today && (today.localEstimatedTokens || 0) > 0
+          ? today.localEstimatedTokens
+          : undefined,
+      apiTokens:
+        today && (today.tokens || 0) > 0 ? today.tokens : undefined,
+      cumulativeSpendCents:
+        typeof spend === "number" && Number.isFinite(spend) ? spend : undefined,
+    });
+  } else {
+    series = await store.loadDailyMetricsSeries();
+  }
+  data.daily = mergeDailyWithDailyMetrics(data.daily ?? [], series);
 }
 
 async function publish(

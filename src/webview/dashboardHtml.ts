@@ -876,8 +876,9 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             </div>
             <div class="seg" role="tablist" aria-label="Trend metric">
               <button type="button" class="active" data-metric="requests">Requests</button>
-              <button type="button" data-metric="tokens">Tokens</button>
               <button type="button" data-metric="code" title="Lines ±, applies, accepts from Cursor analytics (when published)">Code</button>
+              <button type="button" data-metric="usage" title="Weekly included usage % logged locally each refresh">Usage</button>
+              <button type="button" data-metric="tokens">Tokens</button>
               <button type="button" data-metric="spend" hidden>Spend</button>
             </div>
           </div>
@@ -980,6 +981,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         metric = btn.getAttribute("data-metric") || "requests";
         metricUserSet = true;
         syncMetricToggle();
+        rebuildTrendRangeOptions((data && data.daily) || []);
         drawTrend();
       });
     });
@@ -1226,6 +1228,22 @@ export function getDashboardHtml(webview: vscode.Webview): string {
     /** Any billed, analytics, or local signal that makes a day worth plotting. */
     function dayHasActivity(d) {
       if (!d) return false;
+      if (metric === "usage") {
+        return (
+          d.includedPercentUsed != null &&
+          Number.isFinite(Number(d.includedPercentUsed))
+        );
+      }
+      if (metric === "spend") {
+        return (
+          (d.loggedSpendCents != null &&
+            Number.isFinite(Number(d.loggedSpendCents))) ||
+          (d.costCents || 0) > 0
+        );
+      }
+      if (metric === "tokens") {
+        return (d.tokens || 0) > 0 || (d.localEstimatedTokens || 0) > 0;
+      }
       return (
         (d.tokens || 0) > 0 ||
         (d.costCents || 0) > 0 ||
@@ -1239,6 +1257,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         (d.localPendingConversations || 0) > 0 ||
         (d.matchedConversations || 0) > 0
       );
+    }
+
+    function fmtUsagePct(n) {
+      if (n == null || !Number.isFinite(Number(n))) return "—";
+      return Number(n).toFixed(1) + "%";
     }
 
     function monthKeyFromDay(isoDay) {
@@ -1379,15 +1402,31 @@ export function getDashboardHtml(webview: vscode.Webview): string {
         if (!metricUserSet) {
           metric = "requests";
         }
-        if (trend.spendTrendUnavailable && metric === "spend") {
-          metric = "requests";
-          metricUserSet = false;
-        }
-        rebuildTrendRangeOptions(data.daily || []);
         syncMetricToggle();
         const hasCodingSeries =
           Array.isArray(data.daily) &&
           data.daily.some((d) => (d.codingActivity || 0) > 0);
+        const hasUsageSeries =
+          Array.isArray(data.daily) &&
+          data.daily.some(
+            (d) =>
+              d.includedPercentUsed != null &&
+              Number.isFinite(Number(d.includedPercentUsed))
+          );
+        const hasLoggedSpend =
+          Array.isArray(data.daily) &&
+          data.daily.some(
+            (d) =>
+              d.loggedSpendCents != null &&
+              Number.isFinite(Number(d.loggedSpendCents))
+          );
+        const spendUnavailable =
+          !!trend.spendTrendUnavailable && !hasLoggedSpend;
+        if (spendUnavailable && metric === "spend") {
+          metric = "requests";
+          metricUserSet = false;
+          syncMetricToggle();
+        }
         document.querySelectorAll("[data-metric='code']").forEach((btn) => {
           btn.hidden = !hasCodingSeries;
           btn.disabled = !hasCodingSeries;
@@ -1395,20 +1434,33 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             ? "Lines added/deleted, applies, accepts (get-user-analytics)"
             : "No coding metrics in analytics for this window";
         });
+        document.querySelectorAll("[data-metric='usage']").forEach((btn) => {
+          btn.hidden = !hasUsageSeries;
+          btn.disabled = !hasUsageSeries;
+          btn.title = hasUsageSeries
+            ? "Weekly included usage % logged locally each refresh"
+            : "No included-usage history logged yet";
+        });
         document.querySelectorAll("[data-metric='spend']").forEach((btn) => {
-          // No Cursor cost events → Spend adds nothing; hide the tab entirely.
-          const hide = !!trend.spendTrendUnavailable;
-          btn.hidden = hide;
-          btn.disabled = hide;
-          btn.title = hide
+          btn.hidden = spendUnavailable;
+          btn.disabled = spendUnavailable;
+          btn.title = spendUnavailable
             ? "Spend trend unavailable for this plan"
-            : "API spend";
+            : hasLoggedSpend
+              ? "Daily spend from local cumulative log (on-demand / prepaid)"
+              : "API spend";
         });
         if (!hasCodingSeries && metric === "code") {
           metric = "requests";
           metricUserSet = false;
           syncMetricToggle();
         }
+        if (!hasUsageSeries && metric === "usage") {
+          metric = "requests";
+          metricUserSet = false;
+          syncMetricToggle();
+        }
+        rebuildTrendRangeOptions(data.daily || []);
         const windowName =
           trend.rangeKind === "weekly" ? "weekly window" : "billing window";
         const lastApiWhen = trend.lastEventAt
@@ -2062,13 +2114,46 @@ export function getDashboardHtml(webview: vscode.Webview): string {
       const sliced = sliceDailyForRange(dailyAll);
       const daily = sliced.days;
       const trend = (data && data.trend) || {};
-      if (metric === "spend" && trend.spendTrendUnavailable) {
+      const hasLoggedSpendNote = dailyAll.some(
+        (d) =>
+          d.loggedSpendCents != null &&
+          Number.isFinite(Number(d.loggedSpendCents))
+      );
+      if (
+        metric === "spend" &&
+        trend.spendTrendUnavailable &&
+        !hasLoggedSpendNote
+      ) {
         note.textContent =
           "Spend trend unavailable — Cursor does not publish per-chat costs for this plan. Prepaid / on-demand totals stay in Plan above.";
       } else {
+        const usageDays = dailyAll.filter(
+          (d) =>
+            d.includedPercentUsed != null &&
+            Number.isFinite(Number(d.includedPercentUsed))
+        ).length;
+        const spendDays = dailyAll.filter(
+          (d) => (d.loggedSpendCents || 0) > 0
+        ).length;
         const base =
-          trend.note ||
-          (dailyAll.length ? dailyAll.length + " days in window" : "No daily activity yet.");
+          metric === "usage"
+            ? "Local included-usage log · " +
+              usageDays +
+              " day" +
+              (usageDays === 1 ? "" : "s") +
+              " sampled"
+            : metric === "spend" && hasLoggedSpendNote
+              ? "Local spend log (day-over-day from cumulative on-demand / prepaid) · " +
+                spendDays +
+                " day" +
+                (spendDays === 1 ? "" : "s") +
+                " with spend"
+              : metric === "tokens"
+                ? "Tokens · local day estimates (~) when Cursor billing items lack a daily split"
+                : trend.note ||
+                  (dailyAll.length
+                    ? dailyAll.length + " days in window"
+                    : "No daily activity yet.");
         if (sliced.mode === "month" && sliced.month) {
           note.textContent =
             base +
@@ -2116,44 +2201,77 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
       const noApiTokens = !!trend.apiEventsUnavailable;
       const fillRequests = metric === "requests" && !!trend.analyticsLagging;
+      const apiTokenDays = daily.filter((d) => (d.tokens || 0) > 0).length;
+      const localTokenDays = daily.filter(
+        (d) => (d.localEstimatedTokens || 0) > 0
+      ).length;
+      // Billing-items (and similar) often dump a token lump on one day. Prefer
+      // the local day-bucketed estimates so the Tokens chart stays readable.
+      const preferLocalTokens =
+        metric === "tokens" &&
+        (noApiTokens ||
+          trend.usageEventsFetchStrategy === "billing-items" ||
+          (apiTokenDays > 0 &&
+            apiTokenDays <= 2 &&
+            localTokenDays >= 3));
+      const hasLoggedSpend = daily.some(
+        (d) =>
+          d.loggedSpendCents != null &&
+          Number.isFinite(Number(d.loggedSpendCents))
+      );
       // Tokens without Cursor events: local day-bucketed estimates are primary.
       // Requests: analytics blue, optionally filled with local turns when lagging;
       //   dashed line always shows the full local turn series.
       // Code: composite analytics score (lines ±, applies, accepts).
-      // Spend without Cursor events: no invented series (handled below + disabled tab).
+      // Usage: durable local log of weekly included pool %.
+      // Spend: durable cumulative→delta log when per-chat costs are missing.
       const apiValues = daily.map((d) => {
         if (metric === "spend") {
+          if (hasLoggedSpend) {
+            return toDisplayAmount((d.loggedSpendCents || 0) / 100);
+          }
           return noApiTokens ? 0 : toDisplayAmount(d.costCents / 100);
         }
         if (metric === "code") {
           return d.codingActivity || 0;
+        }
+        if (metric === "usage") {
+          return d.includedPercentUsed != null &&
+            Number.isFinite(Number(d.includedPercentUsed))
+            ? Number(d.includedPercentUsed)
+            : 0;
         }
         if (metric === "requests") {
           const api = d.apiRequests || 0;
           const local = d.localEstimatedRequests || 0;
           return fillRequests ? Math.max(api, local) : api;
         }
-        if (noApiTokens) {
+        if (preferLocalTokens || noApiTokens) {
           return d.localEstimatedTokens || 0;
         }
         return d.tokens;
       });
       const localValues = daily.map((d) => {
-        // Tokens and Code have one series. A dashed estimate on Tokens sits
-        // on the axis once billed totals are in the millions.
         if (metric === "requests") {
           return d.localEstimatedRequests || 0;
+        }
+        // When API tokens are the primary series, still show local estimates.
+        if (metric === "tokens" && !preferLocalTokens && !noApiTokens) {
+          return d.localEstimatedTokens || 0;
         }
         return 0;
       });
       const maxApi = Math.max(...apiValues, 0);
       const maxLocal = Math.max(...localValues, 0);
-      const hasLocalSeries = maxLocal > 0 && metric === "requests";
+      const hasLocalSeries =
+        maxLocal > 0 && (metric === "requests" || metric === "tokens");
       const sharedScale =
         metric === "tokens" || metric === "requests";
       const apiMax = sharedScale
         ? Math.max(maxApi, maxLocal, 1)
-        : Math.max(maxApi, metric === "spend" ? 0.01 : 1);
+        : metric === "usage"
+          ? Math.max(100, maxApi, 1)
+          : Math.max(maxApi, metric === "spend" ? 0.01 : 1);
       const localMax = sharedScale
         ? apiMax
         : Math.max(maxLocal, 1);
@@ -2170,13 +2288,25 @@ export function getDashboardHtml(webview: vscode.Webview): string {
 
       if (legend) {
         legend.hidden = false;
-        if (metric === "spend" && trend.spendTrendUnavailable) {
+        if (
+          metric === "spend" &&
+          trend.spendTrendUnavailable &&
+          !hasLoggedSpend
+        ) {
           legend.hidden = true;
           legend.innerHTML = "";
         } else if (metric === "code") {
           legend.hidden = false;
           legend.innerHTML =
             '<span><i class="trend-swatch" aria-hidden="true"></i> Coding activity (analytics: lines ±, applies, accepts)</span>';
+        } else if (metric === "usage") {
+          legend.hidden = false;
+          legend.innerHTML =
+            '<span><i class="trend-swatch" aria-hidden="true"></i> Weekly included usage (local log)</span>';
+        } else if (metric === "spend" && hasLoggedSpend) {
+          legend.hidden = false;
+          legend.innerHTML =
+            '<span><i class="trend-swatch" aria-hidden="true"></i> Daily spend (local cumulative log)</span>';
         } else {
           const apiLegend =
             metric === "spend"
@@ -2185,7 +2315,7 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                 ? fillRequests
                   ? "Requests (Cursor, local ~ fill)"
                   : "Cursor analytics requests"
-                : noApiTokens
+                : preferLocalTokens || noApiTokens
                   ? "Local est. tokens (~)"
                   : "API tokens";
           const showLocal = hasLocalSeries;
@@ -2320,7 +2450,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
                   ? String(Math.round(p.v))
                   : metric === "code"
                     ? String(Math.round(p.v))
-                    : fmtTokens(p.v);
+                    : metric === "usage"
+                      ? fmtUsagePct(p.v)
+                      : preferLocalTokens || noApiTokens
+                        ? "~" + fmtTokens(p.v)
+                        : fmtTokens(p.v);
             ctx.fillText(label, p.x, p.y - 6);
           });
         }
@@ -2338,7 +2472,11 @@ export function getDashboardHtml(webview: vscode.Webview): string {
             ? String(Math.round(apiMax)) + " req"
             : metric === "code"
               ? String(Math.round(apiMax))
-              : fmtTokens(apiMax);
+              : metric === "usage"
+                ? fmtUsagePct(apiMax)
+                : preferLocalTokens || noApiTokens
+                  ? "~" + fmtTokens(apiMax)
+                  : fmtTokens(apiMax);
       ctx.fillText(apiTopLabel, pad.l - 8, pad.t);
       ctx.fillText("0", pad.l - 8, pad.t + plotH);
       if (hasLocalSeries) {

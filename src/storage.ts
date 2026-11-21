@@ -1,12 +1,20 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as vscode from "vscode";
-import type { DashboardData, WorkspaceStore } from "./types";
+import type {
+  DashboardData,
+  DailyMetricsPoint,
+  DailyMetricsSeries,
+  WorkspaceStore,
+} from "./types";
 
 const STORE_FILE = "workspace-usage.json";
 const CACHE_FILE = "last-dashboard.json";
 const RAW_CACHE_FILE = "cache/raw-latest.json";
 const HISTORY_DIR = "cache/history";
+const DAILY_METRICS_FILE = "cache/daily-metrics-series.json";
+/** Legacy file from the first Usage-only series; migrated on first load. */
+const LEGACY_INCLUDED_USAGE_FILE = "cache/included-usage-series.json";
 
 /** One snapshot file per calendar day; older days are deleted. */
 const MAX_HISTORY_DAYS = 14;
@@ -364,6 +372,153 @@ export class LocalStore {
     }
   }
 
+  /**
+   * Durable daily metrics for Trend (included %, local tokens, cumulative spend).
+   * Survives the 14-day recovery history prune. Upserts one point per calendar day.
+   */
+  async loadDailyMetricsSeries(): Promise<DailyMetricsPoint[]> {
+    void this.runMaintenance();
+    return this.enqueueWrite(async () => this.readOrSeedDailyMetricsSeries());
+  }
+
+  /** @deprecated Prefer loadDailyMetricsSeries */
+  async loadIncludedUsageSeries(): Promise<DailyMetricsPoint[]> {
+    return this.loadDailyMetricsSeries();
+  }
+
+  /**
+   * Upsert today’s durable metrics and return the full series.
+   * Seeds from recovery history (and migrates the legacy included-% file) once.
+   */
+  async recordDailyMetrics(
+    point: DailyMetricsPoint
+  ): Promise<DailyMetricsPoint[]> {
+    return this.enqueueWrite(async () => {
+      const points = await this.readOrSeedDailyMetricsSeries();
+      const next = upsertDailyMetricsPoint(points, point);
+      await this.writeDailyMetricsSeries(next);
+      return next;
+    });
+  }
+
+  /** @deprecated Prefer recordDailyMetrics */
+  async recordIncludedUsage(
+    point: DailyMetricsPoint & { pct?: number }
+  ): Promise<DailyMetricsPoint[]> {
+    const included =
+      typeof point.includedPercentUsed === "number"
+        ? point.includedPercentUsed
+        : typeof point.pct === "number"
+          ? point.pct
+          : undefined;
+    return this.recordDailyMetrics({
+      ...point,
+      includedPercentUsed: included,
+    });
+  }
+
+  private async readOrSeedDailyMetricsSeries(): Promise<DailyMetricsPoint[]> {
+    const filePath = path.join(this.dir, DAILY_METRICS_FILE);
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      return normalizeDailyMetricsSeries(JSON.parse(raw));
+    } catch {
+      const fromLegacy = await this.readLegacyIncludedUsageSeries();
+      const seeded = await this.seedDailyMetricsFromHistory();
+      const merged = mergeDailyMetricsPoints(seeded, fromLegacy);
+      if (merged.length) {
+        await this.writeDailyMetricsSeries(merged);
+      }
+      return merged;
+    }
+  }
+
+  private async writeDailyMetricsSeries(
+    points: DailyMetricsPoint[]
+  ): Promise<void> {
+    await this.ensureDir();
+    const body: DailyMetricsSeries = { version: 1, points };
+    await this.writeJsonAtomic(
+      path.join(this.dir, DAILY_METRICS_FILE),
+      body,
+      false
+    );
+  }
+
+  private async readLegacyIncludedUsageSeries(): Promise<DailyMetricsPoint[]> {
+    try {
+      const raw = await fs.readFile(
+        path.join(this.dir, LEGACY_INCLUDED_USAGE_FILE),
+        "utf8"
+      );
+      return normalizeDailyMetricsSeries(JSON.parse(raw));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Best-effort bootstrap from existing cache/history/YYYY-MM-DD.json files. */
+  private async seedDailyMetricsFromHistory(): Promise<DailyMetricsPoint[]> {
+    const histDir = path.join(this.dir, HISTORY_DIR);
+    let names: string[];
+    try {
+      names = (await fs.readdir(histDir))
+        .filter((n) => /^\d{4}-\d{2}-\d{2}\.json$/.test(n))
+        .sort();
+    } catch {
+      return [];
+    }
+    const byDay = new Map<string, DailyMetricsPoint>();
+    for (const name of names) {
+      try {
+        const raw = await fs.readFile(path.join(histDir, name), "utf8");
+        const data = JSON.parse(raw) as DashboardData;
+        const day = name.slice(0, 10);
+        const fetchedAt =
+          typeof data.fetchedAt === "string" && data.fetchedAt
+            ? data.fetchedAt
+            : `${day}T00:00:00.000Z`;
+        const pct = data.plan?.includedPercentUsed;
+        const spend = data.plan?.onDemandUsedCents;
+        const dayRow = Array.isArray(data.daily)
+          ? data.daily.find((d) => d.date === day)
+          : undefined;
+        const point: DailyMetricsPoint = {
+          day,
+          fetchedAt,
+          cycleStart: data.plan?.cycleStart,
+          cycleEnd: data.plan?.cycleEnd,
+        };
+        if (typeof pct === "number" && Number.isFinite(pct)) {
+          point.includedPercentUsed = pct;
+        }
+        if (typeof spend === "number" && Number.isFinite(spend)) {
+          point.cumulativeSpendCents = spend;
+        }
+        if (dayRow) {
+          if ((dayRow.localEstimatedTokens || 0) > 0) {
+            point.localTokens = dayRow.localEstimatedTokens;
+          }
+          if ((dayRow.tokens || 0) > 0) {
+            point.apiTokens = dayRow.tokens;
+          }
+        }
+        if (
+          point.includedPercentUsed == null &&
+          point.cumulativeSpendCents == null &&
+          point.localTokens == null &&
+          point.apiTokens == null
+        ) {
+          continue;
+        }
+        byDay.set(day, point);
+      } catch {
+        // skip corrupt history day
+      }
+    }
+    return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+  }
+
   async saveRawSnapshot(snapshot: RawDashboardSnapshot): Promise<void> {
     return this.enqueueWrite(() => this.writeRawSnapshot(snapshot));
   }
@@ -397,6 +552,107 @@ export class LocalStore {
     }
     await this.writeJsonAtomic(path.join(this.dir, RAW_CACHE_FILE), slim, false);
   }
+}
+
+function finiteOrUndef(v: unknown): number | undefined {
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    return undefined;
+  }
+  return v;
+}
+
+function normalizeDailyMetricsSeries(raw: unknown): DailyMetricsPoint[] {
+  if (!raw || typeof raw !== "object") {
+    return [];
+  }
+  const points = (raw as DailyMetricsSeries).points;
+  if (!Array.isArray(points)) {
+    return [];
+  }
+  const byDay = new Map<string, DailyMetricsPoint>();
+  for (const row of points) {
+    if (!row || typeof row !== "object") {
+      continue;
+    }
+    const day = typeof row.day === "string" ? row.day.trim() : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      continue;
+    }
+    const legacyPct = finiteOrUndef((row as { pct?: number }).pct);
+    const includedPercentUsed =
+      finiteOrUndef(row.includedPercentUsed) ?? legacyPct;
+    const point: DailyMetricsPoint = {
+      day,
+      fetchedAt:
+        typeof row.fetchedAt === "string" && row.fetchedAt
+          ? row.fetchedAt
+          : `${day}T00:00:00.000Z`,
+      cycleStart:
+        typeof row.cycleStart === "string" ? row.cycleStart : undefined,
+      cycleEnd: typeof row.cycleEnd === "string" ? row.cycleEnd : undefined,
+      includedPercentUsed,
+      localTokens: finiteOrUndef(row.localTokens),
+      apiTokens: finiteOrUndef(row.apiTokens),
+      cumulativeSpendCents: finiteOrUndef(row.cumulativeSpendCents),
+    };
+    if (
+      point.includedPercentUsed == null &&
+      point.localTokens == null &&
+      point.apiTokens == null &&
+      point.cumulativeSpendCents == null
+    ) {
+      continue;
+    }
+    byDay.set(day, point);
+  }
+  return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+}
+
+function mergeDailyMetricsPoints(
+  ...lists: DailyMetricsPoint[][]
+): DailyMetricsPoint[] {
+  let out: DailyMetricsPoint[] = [];
+  for (const list of lists) {
+    for (const point of list) {
+      out = upsertDailyMetricsPoint(out, point);
+    }
+  }
+  return out;
+}
+
+function upsertDailyMetricsPoint(
+  points: DailyMetricsPoint[],
+  point: DailyMetricsPoint
+): DailyMetricsPoint[] {
+  const day = point.day?.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return points;
+  }
+  const prev = points.find((p) => p.day === day);
+  const nextPoint: DailyMetricsPoint = {
+    day,
+    fetchedAt: point.fetchedAt || prev?.fetchedAt || new Date().toISOString(),
+    cycleStart: point.cycleStart ?? prev?.cycleStart,
+    cycleEnd: point.cycleEnd ?? prev?.cycleEnd,
+    includedPercentUsed:
+      finiteOrUndef(point.includedPercentUsed) ?? prev?.includedPercentUsed,
+    localTokens: finiteOrUndef(point.localTokens) ?? prev?.localTokens,
+    apiTokens: finiteOrUndef(point.apiTokens) ?? prev?.apiTokens,
+    cumulativeSpendCents:
+      finiteOrUndef(point.cumulativeSpendCents) ?? prev?.cumulativeSpendCents,
+  };
+  if (
+    nextPoint.includedPercentUsed == null &&
+    nextPoint.localTokens == null &&
+    nextPoint.apiTokens == null &&
+    nextPoint.cumulativeSpendCents == null
+  ) {
+    return points;
+  }
+  const next = points.filter((p) => p.day !== day);
+  next.push(nextPoint);
+  next.sort((a, b) => a.day.localeCompare(b.day));
+  return next;
 }
 
 /** Keep open windows + recent closed ones; drop old closed sessions. */

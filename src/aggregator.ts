@@ -21,6 +21,7 @@ import type {
   BillingUsageItem,
   FilteredUsageEvent,
   FilteredUsageEventsResponse,
+  DailyMetricsPoint,
   ModelBreakdown,
   PeriodUsage,
   PlanView,
@@ -705,6 +706,100 @@ export function analyticsDaysInRange(
     out.push(day);
   }
   return out;
+}
+
+/**
+ * Day-over-day spend from a cumulative money series (USD cents).
+ * First sample and resets (drops) yield 0 so the chart does not invent a spike.
+ */
+export function spendDeltasFromCumulative(
+  series: DailyMetricsPoint[]
+): Map<string, number> {
+  const sorted = series
+    .filter(
+      (p) =>
+        p?.day &&
+        typeof p.cumulativeSpendCents === "number" &&
+        Number.isFinite(p.cumulativeSpendCents)
+    )
+    .sort((a, b) => a.day.localeCompare(b.day));
+  const deltas = new Map<string, number>();
+  for (let i = 0; i < sorted.length; i++) {
+    const cur = sorted[i];
+    if (i === 0) {
+      deltas.set(cur.day, 0);
+      continue;
+    }
+    const prev = sorted[i - 1];
+    const delta =
+      (cur.cumulativeSpendCents as number) -
+      (prev.cumulativeSpendCents as number);
+    deltas.set(cur.day, delta > 0 ? delta : 0);
+  }
+  return deltas;
+}
+
+/**
+ * Overlay durable local metrics (included %, tokens, spend deltas) onto daily
+ * Trend points. Adds empty day rows for series dates outside the current window.
+ */
+export function mergeDailyWithDailyMetrics(
+  daily: DailyPoint[],
+  series: DailyMetricsPoint[]
+): DailyPoint[] {
+  if (!series.length) {
+    return daily;
+  }
+  const spendDeltas = spendDeltasFromCumulative(series);
+  const byDay = new Map(daily.map((d) => [d.date, { ...d }]));
+  for (const sample of series) {
+    if (!sample?.day) {
+      continue;
+    }
+    let point = byDay.get(sample.day);
+    if (!point) {
+      point = emptyDailyPoint(sample.day);
+      byDay.set(sample.day, point);
+    }
+    if (
+      typeof sample.includedPercentUsed === "number" &&
+      Number.isFinite(sample.includedPercentUsed)
+    ) {
+      point.includedPercentUsed = sample.includedPercentUsed;
+    } else {
+      const legacyPct = (sample as { pct?: number }).pct;
+      if (typeof legacyPct === "number" && Number.isFinite(legacyPct)) {
+        point.includedPercentUsed = legacyPct;
+      }
+    }
+    if (
+      typeof sample.localTokens === "number" &&
+      Number.isFinite(sample.localTokens) &&
+      sample.localTokens > (point.localEstimatedTokens || 0)
+    ) {
+      point.localEstimatedTokens = sample.localTokens;
+    }
+    if (
+      typeof sample.apiTokens === "number" &&
+      Number.isFinite(sample.apiTokens) &&
+      sample.apiTokens > 0 &&
+      (point.tokens || 0) <= 0
+    ) {
+      point.tokens = sample.apiTokens;
+    }
+    if (spendDeltas.has(sample.day)) {
+      point.loggedSpendCents = spendDeltas.get(sample.day);
+    }
+  }
+  return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** @deprecated Prefer mergeDailyWithDailyMetrics */
+export function mergeDailyWithIncludedUsage(
+  daily: DailyPoint[],
+  series: DailyMetricsPoint[]
+): DailyPoint[] {
+  return mergeDailyWithDailyMetrics(daily, series);
 }
 
 /** Overlay analytics request counts onto daily Trend points. */

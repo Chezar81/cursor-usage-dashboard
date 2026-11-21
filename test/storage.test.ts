@@ -84,3 +84,65 @@ test("cached dashboard round-trips through concurrent saves", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("daily metrics series upserts by day and seeds from history", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage-store-test-"));
+  try {
+    const histDir = path.join(dir, "cache", "history");
+    fs.mkdirSync(histDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(histDir, "2026-11-06.json"),
+      JSON.stringify({
+        fetchedAt: "2026-11-06T22:54:04.769Z",
+        plan: {
+          includedPercentUsed: 1.5,
+          onDemandUsedCents: 1000,
+          cycleStart: "2026-11-06T20:08:06.633Z",
+          cycleEnd: "2026-11-13T20:08:06.633Z",
+        },
+        daily: [
+          {
+            date: "2026-11-06",
+            tokens: 0,
+            localEstimatedTokens: 5000,
+            costCents: 0,
+            eventCount: 0,
+            localPendingConversations: 0,
+            localEstimatedRequests: 0,
+            matchedConversations: 0,
+          },
+        ],
+      })
+    );
+    const store = makeStore(dir);
+    const seeded = await store.loadDailyMetricsSeries();
+    assert.equal(seeded.length, 1);
+    assert.equal(seeded[0].day, "2026-11-06");
+    assert.equal(seeded[0].includedPercentUsed, 1.5);
+    assert.equal(seeded[0].localTokens, 5000);
+    assert.equal(seeded[0].cumulativeSpendCents, 1000);
+
+    const after = await store.recordDailyMetrics({
+      day: "2026-11-21",
+      includedPercentUsed: 36.4,
+      localTokens: 200,
+      cumulativeSpendCents: 1400,
+      fetchedAt: "2026-11-21T21:00:00.000Z",
+    });
+    assert.equal(after.length, 2);
+    assert.equal(after[1].includedPercentUsed, 36.4);
+    assert.equal(after[1].cumulativeSpendCents, 1400);
+
+    const replaced = await store.recordDailyMetrics({
+      day: "2026-11-21",
+      includedPercentUsed: 40,
+      fetchedAt: "2026-11-21T22:00:00.000Z",
+    });
+    assert.equal(replaced.length, 2);
+    assert.equal(replaced[1].includedPercentUsed, 40);
+    assert.equal(replaced[1].localTokens, 200);
+    assert.equal(replaced[1].fetchedAt, "2026-11-21T22:00:00.000Z");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

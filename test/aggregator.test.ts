@@ -15,7 +15,9 @@ import {
   intersectMsRanges,
   dedupeModelsByLabel,
   mergeDailyWithAnalytics,
+  mergeDailyWithDailyMetrics,
   mergeModelsWithAnalytics,
+  spendDeltasFromCumulative,
   mergeModelsWithLocal,
   modelEffectiveRequests,
   modelsFromAnalytics,
@@ -475,6 +477,60 @@ test("mergeDailyWithAnalytics adds coding fields and codingActivity score", () =
   assert.equal(p.totalApplies, 1);
   assert.equal(p.totalAccepts, 4);
   assert.equal(p.codingActivity, 18);
+});
+
+test("mergeDailyWithDailyMetrics overlays usage, tokens, and spend deltas", () => {
+  const merged = mergeDailyWithDailyMetrics(
+    [
+      {
+        date: "2026-11-21",
+        tokens: 100,
+        costCents: 0,
+        eventCount: 1,
+        localPendingConversations: 0,
+        localEstimatedTokens: 50,
+        localEstimatedRequests: 0,
+        matchedConversations: 1,
+      },
+    ],
+    [
+      {
+        day: "2026-11-06",
+        includedPercentUsed: 1.5,
+        localTokens: 1000,
+        cumulativeSpendCents: 100,
+        fetchedAt: "2026-11-06T22:00:00.000Z",
+      },
+      {
+        day: "2026-11-21",
+        includedPercentUsed: 36.4,
+        localTokens: 200,
+        cumulativeSpendCents: 250,
+        fetchedAt: "2026-11-21T21:00:00.000Z",
+      },
+    ]
+  );
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].date, "2026-11-06");
+  assert.equal(merged[0].includedPercentUsed, 1.5);
+  assert.equal(merged[0].localEstimatedTokens, 1000);
+  assert.equal(merged[0].loggedSpendCents, 0);
+  assert.equal(merged[1].date, "2026-11-21");
+  assert.equal(merged[1].includedPercentUsed, 36.4);
+  assert.equal(merged[1].localEstimatedTokens, 200);
+  assert.equal(merged[1].loggedSpendCents, 150);
+  assert.equal(merged[1].tokens, 100);
+});
+
+test("spendDeltasFromCumulative ignores resets", () => {
+  const deltas = spendDeltasFromCumulative([
+    { day: "2026-11-01", cumulativeSpendCents: 100, fetchedAt: "a" },
+    { day: "2026-11-02", cumulativeSpendCents: 130, fetchedAt: "b" },
+    { day: "2026-11-03", cumulativeSpendCents: 20, fetchedAt: "c" },
+  ]);
+  assert.equal(deltas.get("2026-11-01"), 0);
+  assert.equal(deltas.get("2026-11-02"), 30);
+  assert.equal(deltas.get("2026-11-03"), 0);
 });
 
 test("buildDashboardData clips Trend to analytics period when billing window is wider", () => {

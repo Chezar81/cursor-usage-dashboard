@@ -271,7 +271,49 @@ export interface DailyPoint {
    * Single series for Trend “Code”: sum of analytics lines±, applies, accepts when any > 0.
    */
   codingActivity?: number;
+  /**
+   * Last known weekly/included pool % for this local day (durable local series).
+   * Used by Trend → Usage; independent of the 14-day recovery history.
+   */
+  includedPercentUsed?: number;
+  /**
+   * Day-over-day spend from the durable cumulative money log (USD cents).
+   * Used by Trend → Spend when Cursor does not publish per-day costs.
+   */
+  loggedSpendCents?: number;
 }
+
+/**
+ * One durable local sample for Trend series that Cursor does not keep as a
+ * daily history (included %, token estimates, cumulative spend).
+ */
+export interface DailyMetricsPoint {
+  /** Local calendar day YYYY-MM-DD */
+  day: string;
+  fetchedAt: string;
+  /** Included / weekly pool percent used at the last refresh that day */
+  includedPercentUsed?: number;
+  cycleStart?: string;
+  cycleEnd?: string;
+  /** Local transcript token estimate for that day (chars÷4). */
+  localTokens?: number;
+  /** Billed/API tokens attributed to that day when Cursor published any. */
+  apiTokens?: number;
+  /**
+   * Cumulative money used at sample time (on-demand or prepaid spent-this-month),
+   * USD cents. Trend → Spend plots day-over-day deltas of this series.
+   */
+  cumulativeSpendCents?: number;
+}
+
+export interface DailyMetricsSeries {
+  version: 1;
+  points: DailyMetricsPoint[];
+}
+
+/** @deprecated Use DailyMetricsPoint — kept for older series files during migrate. */
+export type IncludedUsagePoint = DailyMetricsPoint & { pct?: number };
+export type IncludedUsageSeries = DailyMetricsSeries;
 
 /**
  * One agent chat’s usage on a single local calendar day.

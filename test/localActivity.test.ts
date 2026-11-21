@@ -44,6 +44,12 @@ test("normalizeDisplayName collapses Portable-Local-Studio onto Bavaria_Paratus_
   );
 });
 
+test("normalizeDisplayName collapses River_Raid onto Danube_Raid", () => {
+  assert.equal(normalizeDisplayName("River_Raid"), "danube-raid");
+  assert.equal(normalizeDisplayName("River-Raid"), "danube-raid");
+  assert.equal(normalizeDisplayName("Danube_Raid"), "danube-raid");
+});
+
 test("analyzeTranscriptWithOptionalCache skips re-read when mtime+size match", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cud-tcache-"));
   const file = path.join(dir, "t.jsonl");

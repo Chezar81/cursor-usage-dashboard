@@ -12,6 +12,7 @@ export const NO_WORKSPACE_LABEL = "No workspace";
 export const WORKSPACE_RENAMES: Record<string, string> = {
   anonbrowser: "MintShield",
   "portable-local-studio": "Bavaria_Paratus_AI",
+  "river-raid": "Danube_Raid",
 };
 
 /** Stable file URI comparison across vscode / pathToFileURL encodings. */

@@ -47,7 +47,7 @@ npm install
 npm test
 npm run build
 npx vsce package --no-dependencies --allow-missing-repository
-cursor --install-extension ./cursor-usage-dashboard-0.2.5.vsix
+cursor --install-extension ./cursor-usage-dashboard-0.2.6.vsix
 ```
 
 Or press **F5** from this folder for an Extension Development Host.
@@ -90,6 +90,7 @@ Every successful refresh writes durable files under Cursor’s extension global 
 | `workspace-usage.json` | Workspace estimates + open-window tracking (closed windows older than 30 days dropped) |
 | `cache/raw-latest.json` | Slim raw payloads (event lists omitted; ≤512 KB) |
 | `cache/history/YYYY-MM-DD.json` | One recovery snapshot per day (≤14 days, ≤2 MB total) |
+| `cache/daily-metrics-series.json` | Durable daily log for Trend → Usage % / Tokens (local) / Spend deltas (survives history prune) |
 | `cache/transcript-analysis/*.json` | Per-chat transcript scan cache (mtime+size); skipped when the jsonl is unchanged |
 
 Usage events without a parseable `timestamp` are **dropped** after fetch so they cannot inflate totals or the Trend chart.
