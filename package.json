@@ -2,7 +2,7 @@
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
   "description": "Unofficial personal Cursor usage dashboard (requires your Cursor sign-in): plan cycle, models, trends, and local estimates.",
-  "version": "0.2.7",
+  "version": "0.2.6",
   "publisher": "local",
   "repository": {
     "type": "git",
