@@ -2,7 +2,7 @@
   "name": "cursor-usage-dashboard",
   "displayName": "Cursor Usage Dashboard",
   "description": "Unofficial personal Cursor usage dashboard (requires your Cursor sign-in): plan cycle, models, trends, and local estimates.",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "publisher": "local",
   "repository": {
     "type": "git",
@@ -77,6 +77,14 @@
           "minimum": 0.01,
           "maximum": 10,
           "description": "EUR per 1 USD when displaying Euro. Adjust to match a current rate."
+        },
+        "cursorUsage.workspaceRenames": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Map old workspace folder names to the current name (keys are case-insensitive; _ and - are equivalent) so usage rows fold together after a rename. Stored only in your local Cursor settings — not in the extension source."
         }
       }
     }

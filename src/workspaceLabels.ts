@@ -5,15 +5,45 @@ export const NO_WORKSPACE_ID = "no-workspace";
 export const NO_WORKSPACE_LABEL = "No workspace";
 
 /**
- * Known folder renames under Cursor Workspaces.
- * Old display names / path basenames map to the current folder name so usage
- * from before the rename folds into one Workspaces row.
+ * Optional old→current folder-name map from `cursorUsage.workspaceRenames`.
+ * Kept empty in source so personal project names stay out of the public repo.
  */
-export const WORKSPACE_RENAMES: Record<string, string> = {
-  anonbrowser: "MintShield",
-  "portable-local-studio": "Bavaria_Paratus_AI",
-  "river-raid": "Danube_Raid",
-};
+let workspaceRenames: Record<string, string> = {};
+
+/** Load rename aliases from settings (or clear when empty/undefined). */
+export function configureWorkspaceRenames(
+  map: Record<string, string> | undefined | null
+): void {
+  const next: Record<string, string> = {};
+  if (map && typeof map === "object" && !Array.isArray(map)) {
+    for (const [from, to] of Object.entries(map)) {
+      if (typeof from !== "string" || typeof to !== "string") {
+        continue;
+      }
+      const key = renameKey(from);
+      const target = to.trim();
+      if (!key || !target) {
+        continue;
+      }
+      next[key] = target;
+    }
+  }
+  workspaceRenames = next;
+}
+
+/** Underscore / hyphen / space-insensitive folder-name key. */
+function renameKey(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/-+/g, "-");
+}
+
+/** Look up a configured rename by underscore/hyphen-insensitive key. */
+export function lookupWorkspaceRename(key: string): string | undefined {
+  return workspaceRenames[key];
+}
 
 /** Stable file URI comparison across vscode / pathToFileURL encodings. */
 export function normalizeWorkspaceId(id: string): string {
@@ -36,19 +66,15 @@ export function stripWorkspaceWindowSuffix(name: string): string {
   return name.replace(/\s*\(Workspace\)\s*$/i, "").trim();
 }
 
-/** Underscore/hyphen-insensitive key; applies known renames for grouping. */
+/** Underscore/hyphen-insensitive key; applies configured renames for grouping. */
 export function normalizeDisplayName(name: string): string {
-  const key = stripWorkspaceWindowSuffix(name)
-    .trim()
-    .toLowerCase()
-    .replace(/_/g, "-");
-  const renamed = WORKSPACE_RENAMES[key];
-  return renamed ? renamed.trim().toLowerCase().replace(/_/g, "-") : key;
+  const key = renameKey(stripWorkspaceWindowSuffix(name));
+  const renamed = lookupWorkspaceRename(key);
+  return renamed ? renameKey(renamed) : key;
 }
 
-/** Current display name after applying known renames (preserves target casing). */
+/** Current display name after applying configured renames (preserves target casing). */
 export function canonicalDisplayName(name: string): string {
   const stripped = stripWorkspaceWindowSuffix(name);
-  const key = stripped.trim().toLowerCase().replace(/_/g, "-");
-  return WORKSPACE_RENAMES[key] ?? stripped;
+  return lookupWorkspaceRename(renameKey(stripped)) ?? stripped;
 }

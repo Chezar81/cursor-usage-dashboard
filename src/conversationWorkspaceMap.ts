@@ -5,8 +5,8 @@ import { fileURLToPath, pathToFileURL } from "url";
 import {
   NO_WORKSPACE_ID,
   NO_WORKSPACE_LABEL,
-  WORKSPACE_RENAMES,
   canonicalDisplayName,
+  lookupWorkspaceRename,
   normalizeWorkspaceId,
   stripWorkspaceWindowSuffix,
 } from "./workspaceLabels";
@@ -216,8 +216,9 @@ function resolveWorkspacesFolder(
   ];
   const baseName = stripWorkspaceWindowSuffix(slugTail);
   // Prefer the post-rename folder name when the old basename no longer exists.
-  const renameKey = baseName.trim().toLowerCase().replace(/_/g, "-");
-  const renamed = WORKSPACE_RENAMES[renameKey];
+  const renamed = lookupWorkspaceRename(
+    baseName.trim().toLowerCase().replace(/[\s_]+/g, "-").replace(/-+/g, "-")
+  );
   const needles = renamed ? [renamed, baseName] : [baseName];
 
   for (const root of roots) {

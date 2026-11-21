@@ -743,7 +743,7 @@ export class WorkspaceUsageTracker {
 }
 
 function preferDisplayName(a: string, b: string): string {
-  // Known renames (AnonBrowser → MintShield): always keep the current name.
+  // Configured renames (cursorUsage.workspaceRenames): keep the current name.
   const canonA = canonicalDisplayName(a);
   const canonB = canonicalDisplayName(b);
   if (canonA !== a || canonB !== b) {

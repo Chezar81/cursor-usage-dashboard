@@ -35,6 +35,7 @@ import {
 import { resolveIdeSessionCookie } from "./localAuth";
 import { LocalStore } from "./storage";
 import type { DashboardData } from "./types";
+import { configureWorkspaceRenames } from "./workspaceLabels";
 import { WorkspaceUsageTracker } from "./workspaceTracker";
 
 /** Local-only Context Usage poll while the dashboard webview is open. */
@@ -52,8 +53,20 @@ let contextRefreshing = false;
 /** Singleflight: one DB read per refresh for all parallel Cursor API calls. */
 let sessionTokenPromise: Promise<string | undefined> | undefined;
 
+function applyWorkspaceRenameSettings(): void {
+  const raw = vscode.workspace
+    .getConfiguration("cursorUsage")
+    .get("workspaceRenames");
+  configureWorkspaceRenames(
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, string>)
+      : {}
+  );
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   watchBundleReload(context);
+  applyWorkspaceRenameSettings();
   store = new LocalStore(context.globalStorageUri);
   tracker = new WorkspaceUsageTracker(store);
   client = new CursorDashboardClient(() => resolveSessionToken(context));
@@ -118,6 +131,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("cursorUsage.workspaceRenames")) {
+        applyWorkspaceRenameSettings();
+      }
       if (
         e.affectsConfiguration("cursorUsage.currency") ||
         e.affectsConfiguration("cursorUsage.eurPerUsd") ||
