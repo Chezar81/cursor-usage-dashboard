@@ -9,9 +9,11 @@ Personal usage dashboard (webview + status bar) for **your own** account:
 - Current plan / cycle usage (included pool %, prepaid credits, reset date)
 - Model breakdown (tokens + cost, or analytics request counts on unified Grok billing)
 - **Context Usage** from Cursor’s local composer tray (same source as the chat popup). While the dashboard is open and focused, this box re-reads locally about every 5s — no extra cursor.com traffic
-- Daily trend charts (**Requests** default, Tokens, **Code** from analytics when published; Spend stays hidden when Cursor does not publish per-chat costs). Period menu: **All time** or a calendar month with activity. When `get-user-analytics` sends a `period`, Trend prefers that span (especially right after a weekly pool reset). Click a day to list that day’s chats
+- Daily trend charts — metric tabs **Requests → Code → Usage → Tokens → Spend**. Period menu: **All time** or a calendar month with activity. When `get-user-analytics` sends a `period`, Trend prefers that span (especially right after a weekly pool reset). Click a day to list that day’s chats
+  - **Usage / Tokens / Spend** keep a durable local day log (`cache/daily-metrics-series.json`) so charts stay meaningful when Cursor only publishes sparse billing items or cumulative money totals
+  - **Code** appears when analytics publishes lines/applies/accepts; **Spend** uses day-over-day deltas from logged cumulative on-demand/prepaid when per-chat costs are missing
 - **Local-first** models / trend / workspaces: transcript estimates (`chars÷4`, prefixed `~`) appear immediately; billed API totals replace them when Cursor publishes matching `conversationId`s
-- **Estimated** per-workspace usage from local chats + open-folder tracking
+- **Estimated** per-workspace usage from local chats + open-folder tracking (optional local rename aliases via settings — not hardcoded in the extension)
 
 ## Auth
 
@@ -67,6 +69,7 @@ Or press **F5** from this folder for an Extension Development Host.
 - `cursorUsage.appearance` — `system` (follow Cursor's theme), `light`, or `dark`. The header icon cycles them: monitor, sun, moon.
 - `cursorUsage.currency` — `USD` or `EUR` (also switchable from the dashboard header).
 - `cursorUsage.eurPerUsd` — EUR per 1 USD when displaying Euro (default `0.92`). Cursor amounts are USD; this rate is for display only.
+- `cursorUsage.workspaceRenames` — optional object mapping old workspace folder names to the current name (case-insensitive; `_` / `-` / spaces equivalent) so usage rows fold together after a rename. Stored only in **your** Cursor `settings.json`.
 
 ## Workspaces (estimated)
 
@@ -78,6 +81,8 @@ Cursor does not attribute usage events to folders. This extension estimates loca
 4. **Multi-window** — each Cursor window tracks its own open period (via `sessionId`); another window no longer closes this folder’s timer. Time-based fallback uses focus order when folders overlap.
 
 The dashboard labels this **Estimated (local)**. Chats that never left a local transcript (or ran on another machine) cannot be attributed. Agent chats with no folder open show up as **No workspace**.
+
+After renaming a project folder, add an entry under `cursorUsage.workspaceRenames` so historical rows merge into the new name (see Settings).
 
 ## Local cache (data loss protection)
 
@@ -106,13 +111,15 @@ On unified SAND/Grok plans (`get-sand-usage-status` → `isUnified: true`), Curs
 For these accounts the dashboard:
 
 - **Live from Cursor:** weekly pool %, prepaid credits, and **`get-user-analytics`** daily agent request counts + model request mix (Trend → Requests)
-- **Local:** composer / tracking model labels; transcript token estimates (`~`)
+- **Local:** composer / tracking model labels; transcript token estimates (`~`); durable **Usage % / Tokens / Spend-delta** series for Trend when Cursor’s event feeds lack a daily split
+- When the usage feed falls back to **billing items**, Tokens prefer the local day estimates so one lumped API day does not flatten the chart
 
 If Cursor later publishes billed token events for the window, they automatically replace the local token rows (same `conversationId` matching as on classic plans).
 
 ## Privacy & caveats
 
 - No account secrets are stored in this repository or in the published `.vsix`. Auth uses **your** local Cursor session (read-only) or a token you paste into SecretStorage on your machine.
+- Workspace rename aliases stay in **local** settings (`cursorUsage.workspaceRenames`) — not in the public source.
 - Unofficial endpoints may change without notice; the UI surfaces errors when that happens.
 - Team Admin API and Marketplace publish are out of scope for this personal tool.
 
